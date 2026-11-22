@@ -14,6 +14,12 @@ Dérivé du [`PLAN.md`](PLAN.md). Chaque carte est préfixée par sa
 phase ; les critères d'acceptation de chaque phase sont dans le plan.
 
 ## À faire
+### Phase 7 — Boucle d'apprentissage distribué et cluster de production (post-v1.0)
+- [ ] Pondérations d'agrégation apprises (evaluator) et persistées dans PostgreSQL depuis l'historique `run_instances`
+- [ ] Sélection automatique de topologies (conserver celles qui performent)
+- [ ] Cluster : instances neuron sur nœuds Hurd distants (2–5) via SSH, failover superviseur → `incidents`
+- [ ] Commande `watch` sur `/orchestrate` : supervision temps réel, un curseur par lecteur
+
 
 ### Phase 2 — Supervisor et parallélisme
 - [ ] Surveillance des instances : détection de non-réponse (timeout), redémarrage, incidents persistés dès la détection

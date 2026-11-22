@@ -384,6 +384,26 @@ requête structurée).
 - Documentation utilisateur et architecture (`docs/architecture.md`).
 - **Livrable** : version 1.0.
 
+### Phase 7 — Boucle d'apprentissage distribué et cluster de production (post-v1.0)
+
+- Pondérations d'agrégation apprises par l'évaluateur à partir de
+  l'historique `run_instances` (phase 4), persistées et versionnées
+  dans PostgreSQL : l'agrégation pondérée de la phase 5 devient un
+  état du système, pas un calcul jetable.
+- Sélection automatique de topologies : les configurations qui
+  performent sont conservées et privilégiées, les autres réessayées.
+- Cluster de production : instances `neuron-translator` sur des nœuds
+  Hurd distants (2 à 5 machines) via SSH ; le superviseur détecte la
+  perte d'un nœud, persiste l'`incident` et bascule sur les instances
+  restantes.
+- Supervision temps réel : commande `watch` sur `/orchestrate` (état
+  des instances, compteurs, dernières exécutions, incidents récents),
+  lisible en POSIX pur, un curseur par lecteur.
+- **Livrable** : orchestrateur de production, version 1.1.
+- **Acceptation** : sur un jeu étiqueté, l'agrégation pondérée apprise
+  bat la moyenne uniforme ; cluster 2–5 nœuds avec failover automatique
+  d'un nœud ; `watch` répond en lecture seule sans état global partagé.
+
 ---
 
 ## 6. Schéma PostgreSQL (gelé en phase 0, utilisé dès la phase 1)
@@ -498,6 +518,7 @@ distant est porté par `inference-translator`.
 | 4 | Rejouabilité : rejeu, historique, requêtes en base | 1, 3 |
 | 5 | Évaluation pondérée, sélection de topologies | 2, 4 |
 | 6 | Durcissement, CI Hurd, v1.0 | 1–5 |
+| 7 | Apprentissage distribué (pondérations persistées), cluster SSH, supervision `watch`, v1.1 | 4, 5, 6 | inference phase 8 |
 
 Deux fils de travail (1→2 et 1→3) peuvent avancer en parallèle après
 le MVP. La base de données est intégrée dès la phase 1 : elle n'est
