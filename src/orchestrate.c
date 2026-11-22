@@ -54,6 +54,39 @@ static struct
 
 static char eng_scratch[ORC_SCRATCH];
 
+/* Escape IN into OUT as the body of a JSON string (no surrounding
+ * quotes), bounded by CAP and always NUL-terminated.  Topologies are
+ * free-form strings from the task descriptor: emitting them raw in
+ * the status JSON would break the line as soon as one contains a
+ * quote.  ORC_MAX_TOPOLOGY * 6 + 1 covers the worst case. */
+static void
+json_escape (const char *in, char *out, size_t cap)
+{
+  size_t n = 0;
+
+  for (const unsigned char *p = (const unsigned char *) in;
+       *p != '\0' && n + 7 < cap; p++)
+    {
+      unsigned char c = *p;
+
+      switch (c)
+        {
+        case '"':  out[n++] = '\\'; out[n++] = '"';  break;
+        case '\\': out[n++] = '\\'; out[n++] = '\\'; break;
+        case '\n': out[n++] = '\\'; out[n++] = 'n';  break;
+        case '\r': out[n++] = '\\'; out[n++] = 'r';  break;
+        case '\t': out[n++] = '\\'; out[n++] = 't';  break;
+        default:
+          if (c < 0x20)
+            n += (size_t) snprintf (out + n, cap - n, "\\u%04x", c);
+          else
+            out[n++] = (char) c;
+          break;
+        }
+    }
+  out[n] = '\0';
+}
+
 /* ---------------------------------------------------------------------
  *  Response slot
  * ------------------------------------------------------------------- */
@@ -97,12 +130,15 @@ build_status (void)
 
   for (int i = 0; i < eng.n_instances; i++)
     {
+      char esc[ORC_MAX_TOPOLOGY * 6 + 1];
+
+      json_escape (eng.inst[i].topology, esc, sizeof esc);
       if (i > 0 && n + 1 < sizeof eng.slot)
         eng.slot[n++] = ',';
       w = snprintf (eng.slot + n, sizeof eng.slot - n,
                     "{\"id\": %d, \"topology\": \"%s\","
                     " \"state\": \"%s\"}",
-                    i + 1, eng.inst[i].topology,
+                    i + 1, esc,
                     eng.inst[i].ok ? "done" : "failed");
       if (w < 0 || (size_t) w >= sizeof eng.slot - n)
         {

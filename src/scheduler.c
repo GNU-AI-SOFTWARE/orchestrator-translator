@@ -90,13 +90,17 @@ orc_scheduler_run (struct orc_instio *io, struct orc_storage *st,
 
         row.run_id = run_id;
         row.topology = o->topology;
-        orc_storage_json_vector (desc->input, desc->n_input, input_json,
-                                 sizeof input_json);
+        /* A failed render must never leave the stack buffer
+         * uninitialized: fall back to JSON null. */
+        if (orc_storage_json_vector (desc->input, desc->n_input, input_json,
+                                     sizeof input_json) == 0)
+          strcpy (input_json, "null");
         row.input = input_json;
         if (ok)
           {
-            orc_storage_json_vector (o->out, o->n_out, output_json,
-                                     sizeof output_json);
+            if (orc_storage_json_vector (o->out, o->n_out, output_json,
+                                         sizeof output_json) == 0)
+              strcpy (output_json, "null");
             row.output = output_json;
           }
         else

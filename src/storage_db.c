@@ -193,12 +193,21 @@ db_roundtrip (struct orc_db *db, const char *line, char *resp,
 
       if (w != (ssize_t) len)
         return -1;
-      /* The child answers exactly one line per instruction. */
+      /* The child answers exactly one line per instruction.  Always
+       * read at most resp_cap - 1 - total bytes: the NUL written at
+       * resp[total] after each read must stay inside the buffer (the
+       * old code wrote it at resp[total + r], one byte past the end
+       * when a response exactly filled the buffer). */
       for (;;)
         {
-          ssize_t r = read (db->out_fd, resp + total,
-                            resp_cap - total);
+          ssize_t r;
 
+          if (total >= resp_cap - 1)
+            {
+              errno = EMSGSIZE;
+              return -1;
+            }
+          r = read (db->out_fd, resp + total, resp_cap - 1 - total);
           if (r < 0)
             return -1;
           if (r == 0)
@@ -206,7 +215,8 @@ db_roundtrip (struct orc_db *db, const char *line, char *resp,
               errno = EPIPE;                 /* the child died */
               return -1;
             }
-          resp[total + (size_t) r] = '\0';
+          total += (size_t) r;
+          resp[total] = '\0';
           {
             char *nl = strchr (resp, '\n');
 
@@ -216,12 +226,6 @@ db_roundtrip (struct orc_db *db, const char *line, char *resp,
                 return 0;
               }
           }
-          total += (size_t) r;
-          if (total >= resp_cap - 1)
-            {
-              errno = EMSGSIZE;
-              return -1;
-            }
         }
     }
 
@@ -262,6 +266,54 @@ interpret (const char *resp, long long *id)
   return ORC_ST_TRANSPORT;
 }
 
+/* Append S to BUF as an escaped JSON string literal ("..."), bounded
+ * by CAP.  Returns the new length, or 0 when it does not fit (the
+ * caller refuses the write as ORC_ST_INVALID): a topology containing
+ * a quote must never break the instruction line sent to /db. */
+static size_t
+put_json_str (char *buf, size_t len, size_t cap, const char *s)
+{
+  if (len + 1 >= cap)
+    return 0;
+  buf[len++] = '"';
+  for (const unsigned char *p = (const unsigned char *) s;
+       *p != '\0'; p++)
+    {
+      unsigned char c = *p;
+      const char *esc = NULL;
+      char tmp[8];
+
+      switch (c)
+        {
+        case '"':  esc = "\\\""; break;
+        case '\\': esc = "\\\\"; break;
+        case '\n': esc = "\\n";  break;
+        case '\r': esc = "\\r";  break;
+        case '\t': esc = "\\t";  break;
+        default:
+          if (c < 0x20)
+            {
+              snprintf (tmp, sizeof tmp, "\\u%04x", (unsigned) c);
+              esc = tmp;
+            }
+          break;
+        }
+      size_t n = esc != NULL ? strlen (esc) : 1;
+
+      if (len + n + 1 >= cap)
+        return 0;
+      if (esc != NULL)
+        memcpy (buf + len, esc, n);
+      else
+        buf[len] = (char) c;
+      len += n;
+    }
+  if (len + 1 >= cap)
+    return 0;
+  buf[len++] = '"';
+  return len;
+}
+
 /* Submit one instruction, return its status. */
 static enum orc_storage_status
 db_submit (struct orc_db *db, const char *line, long long *id)
@@ -281,12 +333,23 @@ orc_db_write_run (struct orc_db *db, const struct orc_run_row *row,
                   long long *id)
 {
   char line[ORC_DB_LINE_MAX];
-  int n = snprintf (line, sizeof line,
-                    "{\"table\": \"runs\", \"row\": "
-                    "{\"descriptor\": %s, \"aggregate_strategy\": \"%s\"}}",
-                    row->descriptor, row->aggregate_strategy);
+  size_t n;
+  int w;
 
-  if (n < 0 || (size_t) n >= sizeof line)
+  /* descriptor is verbatim JSON by construction; aggregate_strategy
+   * is escaped like any string field. */
+  w = snprintf (line, sizeof line,
+                "{\"table\": \"runs\", \"row\": "
+                "{\"descriptor\": %s, \"aggregate_strategy\": ",
+                row->descriptor);
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->aggregate_strategy);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n, "}}");
+  if (w < 0 || (size_t) w >= sizeof line - n)
     return ORC_ST_INVALID;
   return db_submit (db, line, id);
 }
@@ -296,16 +359,33 @@ orc_db_write_instance (struct orc_db *db, const struct orc_inst_row *row,
                        long long *id)
 {
   char line[ORC_DB_LINE_MAX];
-  int n = snprintf (line, sizeof line,
-                    "{\"table\": \"run_instances\", \"row\": "
-                    "{\"run_id\": %lld, \"topology\": \"%s\", "
-                    "\"input\": %s, \"output\": %s, \"status\": \"%s\"}}",
-                    row->run_id, row->topology,
-                    row->input != NULL ? row->input : "null",
-                    row->output != NULL ? row->output : "null",
-                    row->status);
+  size_t n;
+  int w;
 
-  if (n < 0 || (size_t) n >= sizeof line)
+  w = snprintf (line, sizeof line,
+                "{\"table\": \"run_instances\", \"row\": "
+                "{\"run_id\": %lld, \"topology\": ",
+                row->run_id);
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->topology);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  /* input/output are JSON vectors rendered by orc_storage_json_vector
+   * (or "null"): they are already valid JSON, kept verbatim. */
+  w = snprintf (line + n, sizeof line - n,
+                ", \"input\": %s, \"output\": %s, \"status\": ",
+                row->input != NULL ? row->input : "null",
+                row->output != NULL ? row->output : "null");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  n += (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->status);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n, "}}");
+  if (w < 0 || (size_t) w >= sizeof line - n)
     return ORC_ST_INVALID;
   return db_submit (db, line, id);
 }

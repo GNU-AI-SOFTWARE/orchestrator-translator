@@ -13,6 +13,7 @@
 
 #include "neuron.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,17 +59,44 @@ orc_neuron_parse_outputs (const char *text, size_t text_len,
 
       if (lb != NULL)
         {
-          char *end = NULL;
-          long idx = strtol (lb + 1, &end, 10);
+          /* Bounded parse: every scan below stays inside
+           * [line, line_end), whatever the caller's buffer looks
+           * like past text_len. */
+          const char *p = lb + 1;
+          const char *line_end = line + line_len;
+          long idx = 0;
+          bool have_digits = false;
 
-          if (end != lb + 1 && *end == ']'
-              && idx >= 0 && idx < max)
+          while (p < line_end && *p == ' ')
+            p++;
+          while (p < line_end && *p >= '0' && *p <= '9')
             {
-              const char *colon = strchr (end, ':');
+              if (idx > max)
+                idx = max + 1;          /* clamp: no long overflow */
+              else
+                idx = idx * 10 + (*p - '0');
+              have_digits = true;
+              p++;
+            }
+          if (have_digits && idx >= 0 && idx < max
+              && p < line_end && *p == ']')
+            {
+              const char *colon = memchr (p + 1, ':',
+                                          (size_t) (line_end - (p + 1)));
 
               if (colon != NULL)
                 {
-                  out[idx] = strtod (colon + 1, NULL);
+                  /* Copy the value span into a bounded buffer:
+                   * strtod itself is not length aware.  64 bytes
+                   * cover any %.6f double. */
+                  size_t vlen = (size_t) (line_end - (colon + 1));
+                  char vbuf[64];
+
+                  if (vlen >= sizeof vbuf)
+                    vlen = sizeof vbuf - 1;
+                  memcpy (vbuf, colon + 1, vlen);
+                  vbuf[vlen] = '\0';
+                  out[idx] = strtod (vbuf, NULL);
                   if (idx > highest)
                     highest = (int) idx;
                 }

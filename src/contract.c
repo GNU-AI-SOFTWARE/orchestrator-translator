@@ -458,9 +458,12 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
           {
             const char *p = sc->s + s0;
             size_t n = e0 - s0;
+            bool negative = false;
+            long v = 0;
 
             if (*p == '-')
               {
+                negative = true;
                 p++;
                 n--;
               }
@@ -477,7 +480,16 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
                   set_detail (req, "instances");
                   return -1;
                 }
-            d->instances = atoi (sc->s + s0);
+            for (size_t i = 0; i < n; i++)
+              {
+                /* Clamp before the multiply: a long digit run must
+                 * never overflow (atoi () on it is undefined). */
+                if (v > ORC_MAX_INSTANCES)
+                  v = ORC_MAX_INSTANCES + 1;
+                else
+                  v = v * 10 + (p[i] - '0');
+              }
+            d->instances = negative ? -(int) v : (int) v;
           }
           if (d->instances < 1 || d->instances > ORC_MAX_INSTANCES)
             {
