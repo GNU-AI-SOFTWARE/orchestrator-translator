@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Claire Ivanenka <claire@gnu-ai.org>
 
 # --- Le cœur de l'orchestration ----------------------------------------
-# contract.c (descripteur et commandes), neuron.c (formats du
+# scanner.c/descriptor.c/parse.c/responses.c (descripteur et commandes), neuron.c (formats du
 # contrat orchestrator->neuron), instio.c (transports
 # d'instances : nœud settrans ou fichiers de test), storage.c
 # (storage_write/storage_read : dispatch, backend mémoire pour
@@ -13,7 +13,10 @@
 noinst_LIBRARIES = liborchcore.a
 
 liborchcore_a_SOURCES = \
-    contract.c \
+    scanner.c \
+    descriptor.c \
+    parse.c \
+    responses.c \
     neuron.c \
     instio.c \
     storage.c \
@@ -24,6 +27,7 @@ liborchcore_a_SOURCES = \
 
 noinst_HEADERS = \
     contract.h \
+    contract_internal.h \
     neuron.h \
     instio.h \
     storage.h \
