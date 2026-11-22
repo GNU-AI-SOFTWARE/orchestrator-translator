@@ -37,6 +37,9 @@ jobs:
         with:
           path: orchestrator-translator
 
+      - name: Version check
+        run: sh orchestrator-translator/scripts/check-version.sh
+
       - name: Fetch the sibling repositories
         uses: actions/checkout@v4
         with:
