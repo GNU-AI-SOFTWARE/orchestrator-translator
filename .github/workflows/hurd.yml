@@ -84,7 +84,7 @@ jobs:
           curl -sI http://127.0.0.1:8000/guest-hurd.sh | head -1
 
       - name: Build and test on real GNU/Hurd
-        run: python3 mistral-vm-debian-hurd/hurd_vm.py "image/$HURD_IMAGE" ci/guest-serial.sh
+        run: python3 mistral-vm-debian-hurd/hurd_vm.py "image/$HURD_IMAGE" orchestrator-translator/ci/guest-serial.sh
 
       - name: Upload the serial log
         if: always()
