@@ -14,6 +14,8 @@ Format « Keep a Changelog », versionnage sémantique. Les contrats gelés
 de `SPEC.md` ne changent jamais silencieusement : toute évolution passe
 par un bump de `version`.
 
+## [0.1.1] — 2026-11-22
+
 ## [Unreleased]
 
 ### Ajouté
