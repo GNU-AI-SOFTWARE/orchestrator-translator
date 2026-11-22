@@ -45,7 +45,7 @@ static int checks_failed = 0;
           checks_failed++;                                              \
           printf ("test_contract: FAIL: %s == \"%s\""                   \
                   " (got \"%s\", %s:%d)\n",                             \
-                  #a, (b), (a) ? (a) : "(null)",                        \
+                  #a, (b), (const char *) (a) != NULL ? (const char *) (a) : "(null)",                        \
                   __FILE__, __LINE__);                                  \
         }                                                               \
     }                                                                   \
