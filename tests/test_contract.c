@@ -177,10 +177,15 @@ test_neuron_formats (void)
   CHECK_STR (buf, "0.5,0.25,1");
 
   /* The neuron state text: outputs as "[i]: value" lines. */
-  CHECK (orc_neuron_parse_outputs (
-           "LLM Sigmoid Neuron Translator\n"
-           "Output:\n  [0]: 0.931223\n  [1]: 0.004321\n"
-           "Statistics:\n", 90, out, 8) == 2);
+  {
+    static const char state_text[] =
+      "LLM Sigmoid Neuron Translator\n"
+      "Output:\n  [0]: 0.931223\n  [1]: 0.004321\n"
+      "Statistics:\n";
+
+    CHECK (orc_neuron_parse_outputs (state_text, sizeof state_text - 1,
+                                     out, 8) == 2);
+  }
   CHECK (out[0] > 0.931222 && out[0] < 0.931224);
   CHECK (out[1] > 0.004320 && out[1] < 0.004322);
 
