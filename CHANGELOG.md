@@ -16,6 +16,13 @@ par un bump de `version`.
 
 ## [Unreleased]
 
+### Ajouté
+
+- **Versionnage itératif** : `scripts/release.sh iterate` (bump patch auto à
+  chaque itération : 0.1.0 → 0.1.1 → 0.1.2 …, `--all` pour toute la pile),
+  helper `scripts/version.sh` (`--next`, `--check`), doc `docs/VERSIONING.md`
+  (section « Versionnage itératif »).
+
 ### Corrigé
 
 - **`src/neuron.c` — lecture hors limites dans `orc_neuron_parse_outputs`** :
