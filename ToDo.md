@@ -169,7 +169,45 @@ Deux fils avancent en parallèle : **1→2** (supervisor) et **1→3**
       boucle locale, CI Hurd, docs (`interface.md`, `remote.md`,
       `architecture.md`) ; **v1.0**.
 
-## 9. Règles transverses (rappels des PLAN.md)
+## 9. P6 — Production et boucle d'apprentissage (post-v1.0, tous dépôts)
+
+La pile passe de la v1.0 (P5) à un service qui tourne : cluster local
+de nœuds Hurd, boucle d'amélioration mesurée, observabilité.  Le
+contrat de `neuron-translator` reste gelé en v1.0 (format `.nn`,
+évolution par versions explicites uniquement).
+
+- [ ] **orchestrator-translator phase 7** — apprentissage distribué et
+      cluster de production : pondérations d'agrégation apprises par
+      l'évaluateur et persistées dans PostgreSQL (à partir de
+      l'historique `run_instances` de la phase 4), sélection
+      automatique de topologies, instances `neuron-translator` sur
+      nœuds Hurd distants (2 à 5 machines) via SSH avec failover
+      superviseur persisté dans `incidents`, commande `watch` de
+      supervision temps réel sur `/orchestrate` ; **v1.1**.
+- [ ] **inference-translator phase 8** — session distante de
+      production : reconnexion et reprise de session (la trame
+      `request` est rejouée sans doublon en base), plusieurs
+      utilisateurs simultanés sans interférence, affichage du progrès
+      et de l'état du cluster ; **v1.1**.
+- [ ] **data-base-translator phase 7** — production : lectures paginées
+      bornées de `training_data`, métriques dans le statut `/db`
+      (taille des tables, volumétrie, doublons/incidents), procédure
+      de sauvegarde/restauration documentée et testée ; **v1.1**.
+- [ ] **httpfs-translator phase 5** — cluster et performance :
+      multi-nœuds (item cluster de la phase 3), multi-utilisateur
+      concurrent (un curseur par lecteur), optimisation IPC Mach
+      (zéro copie), cache Range avec cohérence (ETag/Last-Modified) ;
+      **v1.1**.
+- [ ] **mistral-vm-debian-hurd** — CI à l'échelle : matrice d'images,
+      tests de charge en VM (100+ instances), rapports de performance
+      en artefacts.
+- [ ] **Acceptation globale** : pile v1.1 sur un cluster local de 2 à
+      5 nœuds Hurd ; même prompt → même résultat en local et en
+      distant ; sur un jeu étiqueté, l'agrégation pondérée apprise bat
+      la moyenne uniforme ; `watch` et statuts lisibles en POSIX pur ;
+      métriques de la base accessibles sans outil externe.
+
+## 10. Règles transverses (rappels des PLAN.md)
 
 - C23 / POSIX.1-2008, `trivfs` pour les MVP puis `netfs`.
 - Harnais maison (`CHECK`, `make check`), zéro framework externe.
