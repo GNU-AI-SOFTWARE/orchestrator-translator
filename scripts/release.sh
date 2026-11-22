@@ -47,7 +47,8 @@ release_one() {
   git add VERSION CHANGELOG.md 2>/dev/null || git add VERSION
   git -c commit.gpgsign=false commit -qm "release: v$NEW" || true
   git tag -a "v$NEW" -m "v$NEW" 2>/dev/null || echo "release: tag v$NEW already exists in $d"
-  echo "release: $d $V -> v$NEW  (push with: git push origin main v$NEW)"
+  br=$(git branch --show-current 2>/dev/null || echo main)
+  echo "release: $d $V -> v$NEW  (push with: git push origin $br v$NEW)"
 }
 
 if [ -n "$ALL" ]; then
