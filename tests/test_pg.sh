@@ -25,8 +25,8 @@ if [ -z "${1:-}" ] && [ -x ../src/orchestrator-translator-repl ]; then
 fi
 # The data-base-translator verification binary it drives follows
 # the same convention (under GNU/Hurd the -repl name).
-DBT_DEFAULT=../../../data-base-translator/build/src/db-translator
-if [ -x "$DBT_DEFAULT-repl" ]; then
+DBT_DEFAULT=../../../data-base-translator/src/db-translator
+if [ -x "$DBT_DEFAULT-repl" ] && "$DBT_DEFAULT-repl" --version >/dev/null 2>&1; then
     DBT_DEFAULT="$DBT_DEFAULT-repl"
 fi
 DBT_BINARY="${DBT_BINARY:-$DBT_DEFAULT}"
