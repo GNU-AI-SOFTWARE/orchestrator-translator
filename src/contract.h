@@ -45,6 +45,7 @@ enum orc_command
                           /*  "run": {...} sans "input"}            */
     ORC_CMD_REPLAY,       /* {"command": "replay", "run_id": N} (A3) */
     ORC_CMD_HISTORY,      /* {"command": "history"} (A3)             */
+    ORC_CMD_WATCH,        /* {"command": "watch"} (A4)               */
   };
 
 /* --- Readable reasons of the "invalid" response ----------------------- */
@@ -67,6 +68,7 @@ struct orc_descriptor
     int  instances;                        /* 1..ORC_MAX_INSTANCES */
     int  n_topologies;
     char topologies[ORC_MAX_TOPOLOGIES][ORC_MAX_TOPOLOGY + 1];
+    bool auto_topologies;                  /* phase A4: "topologies": "auto" */
     int  n_input;
     double input[ORC_MAX_INPUT];
     char aggregate[16];                    /* "majority" | "mean" */

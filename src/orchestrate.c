@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -219,6 +220,17 @@ build_result (void)
  * the instances (the supervisor of the scheduler persists each
  * instance row and each incident), aggregate, then publish the
  * final state and the result slot. */
+/* A3/A4 helpers, defined further down. */
+static void scan_init (struct scanner *sc, const char *s, size_t len,
+                       char *scratch, size_t scratch_cap);
+static void persist_scored_instances (long long run_id,
+                                      const struct orc_descriptor *desc,
+                                      const struct orc_sched_result *sched,
+                                      const struct orc_aggregate *agg);
+static void update_aggregator_state (const struct orc_sched_result *sched,
+                                     const struct orc_aggregate *agg);
+static void resolve_auto_topologies (struct orc_descriptor *desc);
+
 static void *
 run_worker (void *arg)
 {
@@ -243,23 +255,33 @@ run_worker (void *arg)
       return NULL;
     }
 
-  pthread_mutex_lock (&eng.lock);
-  eng.n_instances = sched.n;
-  eng.n_ok = sched.n_ok;
-  for (int i = 0; i < sched.n && i < ORC_MAX_INSTANCES; i++)
-    {
-      strcpy (eng.inst[i].topology, sched.inst[i].topology);
-      eng.inst[i].ok = sched.inst[i].ok;
-    }
-  if (orc_aggregate (desc.aggregate, &sched, &agg) < 0)
-    eng.run_state = RUN_FAILED;             /* no instance answered */
-  else
-    {
-      eng.run_state = RUN_DONE;
-      eng.agg = agg;
-    }
-  build_result ();
-  pthread_mutex_unlock (&eng.lock);
+  {
+    int agg_ok = orc_aggregate (desc.aggregate, &sched, &agg) == 0;
+
+    pthread_mutex_lock (&eng.lock);
+    eng.n_instances = sched.n;
+    eng.n_ok = sched.n_ok;
+    for (int i = 0; i < sched.n && i < ORC_MAX_INSTANCES; i++)
+      {
+        strcpy (eng.inst[i].topology, sched.inst[i].topology);
+        eng.inst[i].ok = sched.inst[i].ok;
+      }
+    if (!agg_ok)
+      eng.run_state = RUN_FAILED;           /* no instance answered */
+    else
+      {
+        eng.run_state = RUN_DONE;
+        eng.agg = agg;
+      }
+    build_result ();
+    pthread_mutex_unlock (&eng.lock);
+
+    /* Phase A4: persist the instance rows with their scores, then
+     * update the learned aggregation weights. */
+    persist_scored_instances (run_id, &desc, &sched, agg_ok ? &agg : NULL);
+    if (agg_ok)
+      update_aggregator_state (&sched, &agg);
+  }
   return NULL;
 }
 
@@ -288,6 +310,16 @@ submit_run (const struct orc_descriptor *desc)
       pthread_mutex_unlock (&eng.lock);
       return 0;
     }
+
+  /* Phase A4: "topologies": "auto" resolves against the learned
+   * history before the run is persisted and executed. */
+  {
+    static struct orc_descriptor rdesc;
+
+    rdesc = *desc;
+    resolve_auto_topologies (&rdesc);
+    desc = &rdesc;
+  }
 
   run_row.descriptor = desc->raw;
   run_row.aggregate_strategy = desc->aggregate;
@@ -541,16 +573,359 @@ do_fetch_run (const struct orc_request *req)
 }
 
 /* ---------------------------------------------------------------------
- *  Phase A3: replay and history (the read half of the storage layer)
+ *  Shared A3/A4 read buffers: select rows and the replayed descriptor
+ *  are large — static, never on the (small) demuxer stack.  The
+ *  scanner arena reserves len-pos+1 per string, so parsing a whole
+ *  select body needs its own arena, bigger than eng_scratch.
  * ------------------------------------------------------------------- */
-
-/* Select rows and the replayed descriptor are large: static, never
- * on the (small) demuxer stack. */
 static char a3_rows[256u * 1024u];
 static char a3_desc[ORC_MAX_LINE];
-/* The scanner arena reserves len-pos+1 per string: parsing a whole
- * select body needs its own arena, bigger than eng_scratch. */
 static char a3_scratch[256u * 1024u];
+
+/* ---------------------------------------------------------------------
+ *  Phase A4: scores, learned aggregation weights, auto topologies
+ * ------------------------------------------------------------------- */
+
+/* scan_init is defined with the A3 block below. */
+static void scan_init (struct scanner *sc, const char *s, size_t len,
+                       char *scratch, size_t scratch_cap);
+
+/* cosine — cosine similarity of two vectors; the A4 instance score
+ * is the agreement of one instance with the aggregate. */
+static double
+orc_cosine (const double *a, int na, const double *b, int nb)
+{
+  int n = na < nb ? na : nb;
+  double dot = 0, aa = 0, bb = 0;
+
+  for (int i = 0; i < n; i++)
+    {
+      dot += a[i] * b[i];
+      aa += a[i] * a[i];
+      bb += b[i] * b[i];
+    }
+  if (aa <= 0 || bb <= 0)
+    return 0;
+  return dot / (sqrt (aa) * sqrt (bb));
+}
+
+/* persist_scored_instances — write the run_instances rows of a run
+ * with their A4 score (cosine with the aggregate). */
+static void
+persist_scored_instances (long long run_id,
+                          const struct orc_descriptor *desc,
+                          const struct orc_sched_result *sched,
+                          const struct orc_aggregate *agg)
+{
+  for (int i = 0; i < sched->n; i++)
+    {
+      struct orc_inst_row row;
+      char input_json[1024];
+      char output_json[ORC_MAX_OUTPUT * 16 + 4];
+      long long id = 0;
+
+      row.run_id = run_id;
+      row.topology = sched->inst[i].topology;
+      if (orc_storage_json_vector (desc->input, desc->n_input, input_json,
+                                   sizeof input_json) == 0)
+        strcpy (input_json, "null");
+      row.input = input_json;
+      if (sched->inst[i].ok)
+        {
+          if (orc_storage_json_vector (sched->inst[i].out,
+                                       sched->inst[i].n_out, output_json,
+                                       sizeof output_json) == 0)
+            strcpy (output_json, "null");
+          row.output = output_json;
+        }
+      else
+        row.output = NULL;
+      row.status = sched->inst[i].ok ? "ok" : "failed";
+      row.has_score = sched->inst[i].ok && agg != NULL;
+      row.score = row.has_score
+                  ? orc_cosine (sched->inst[i].out, sched->inst[i].n_out,
+                                agg->out, agg->n)
+                  : 0;
+      (void) orc_storage_write_instance (eng.storage, &row, &id);
+    }
+}
+
+/* update_aggregator_state — after each run, EMA of the mean score per
+ * topology, versioned (append-only: latest version wins). */
+static void
+update_aggregator_state (const struct orc_sched_result *sched,
+                         const struct orc_aggregate *agg)
+{
+  for (int i = 0; i < sched->n; i++)
+    {
+      const char *topo;
+      double sum = 0;
+      int cnt = 0;
+      long count = 0;
+      long long version = 1;
+      double old_weight = -1;
+      struct orc_aggregator_row row;
+      long long id = 0;
+
+      if (!sched->inst[i].ok)
+        continue;
+      topo = sched->inst[i].topology;
+      for (int j = 0; j < sched->n; j++)
+        if (sched->inst[j].ok && strcmp (sched->inst[j].topology, topo) == 0)
+          {
+            sum += orc_cosine (sched->inst[j].out, sched->inst[j].n_out,
+                               agg->out, agg->n);
+            cnt++;
+          }
+      if (cnt == 0)
+        continue;
+
+      /* current version/weight of this topology (latest row) */
+      if (orc_storage_select (eng.storage, "aggregator_state", "topology",
+                              topo, 64, a3_rows, sizeof a3_rows,
+                              &count) == ORC_ST_OK)
+        {
+          struct scanner sc;
+
+          scan_init (&sc, a3_rows, strlen (a3_rows), a3_scratch,
+                     sizeof a3_scratch);
+          while (sc.pos < sc.len)
+            {
+              char tbuf[ORC_MAX_TOPOLOGY + 1] = "";
+              char vbuf[24] = "";
+              char wbuf[32] = "";
+
+              skip_ws (&sc);
+              if (peek (&sc) != '{')
+                break;
+              next (&sc);
+              skip_ws (&sc);
+              if (peek (&sc) != '}')
+                for (;;)
+                  {
+                    size_t kl = 0;
+                    const char *k = parse_string (&sc, &kl);
+                    size_t v0, v1;
+
+                    if (k == NULL)
+                      break;
+                    skip_ws (&sc);
+                    if (next (&sc) != ':')
+                      break;
+                    skip_ws (&sc);
+                    if (skip_value (&sc, &v0, &v1) < 0)
+                      break;
+                    if (kl == 8 && memcmp (k, "topology", 8) == 0)
+                      {
+                        size_t n = v1 - v0;
+
+                        if (n >= 2 && n - 2 < sizeof tbuf)
+                          {
+                            memcpy (tbuf, sc.s + v0 + 1, n - 2);
+                            tbuf[n - 2] = '\0';
+                          }
+                      }
+                    else if (kl == 7 && memcmp (k, "version", 7) == 0)
+                      {
+                        size_t n = v1 - v0;
+
+                        if (n < sizeof vbuf)
+                          {
+                            memcpy (vbuf, sc.s + v0, n);
+                            vbuf[n] = '\0';
+                          }
+                      }
+                    else if (kl == 6 && memcmp (k, "weight", 6) == 0)
+                      {
+                        size_t n = v1 - v0;
+
+                        if (n < sizeof wbuf)
+                          {
+                            memcpy (wbuf, sc.s + v0, n);
+                            wbuf[n] = '\0';
+                          }
+                      }
+                    skip_ws (&sc);
+                    {
+                      int c = next (&sc);
+
+                      if (c == ',')
+                        {
+                          skip_ws (&sc);
+                          continue;
+                        }
+                      break;
+                    }
+                  }
+              if (tbuf[0] != '\0')
+                {
+                  long long cv = atoll (vbuf);
+
+                  if (cv >= version)
+                    {
+                      version = cv + 1;
+                      old_weight = atof (wbuf);
+                    }
+                }
+              skip_ws (&sc);
+              if (peek (&sc) == ',')
+                next (&sc);
+            }
+        }
+
+      row.topology = topo;
+      row.version = version;
+      row.weight = old_weight >= 0
+                   ? 0.7 * old_weight + 0.3 * (sum / cnt)
+                   : sum / cnt;
+      (void) orc_storage_write_aggregator (eng.storage, &row, &id);
+    }
+}
+
+/* resolve_auto_topologies — "topologies": "auto" picks the K best
+ * topologies of the learned history (K = instances, capped); with an
+ * empty history it falls back to the default topology. */
+static void
+resolve_auto_topologies (struct orc_descriptor *desc)
+{
+  long count = 0;
+  struct
+    {
+      char topology[ORC_MAX_TOPOLOGY + 1];
+      double weight;
+    } best[ORC_MAX_TOPOLOGIES];
+  int nbest = 0;
+
+  if (!desc->auto_topologies)
+    return;
+  desc->n_topologies = 0;
+
+  if (orc_storage_select (eng.storage, "aggregator_state", NULL, NULL,
+                          64, a3_rows, sizeof a3_rows,
+                          &count) == ORC_ST_OK && count > 0)
+    {
+      struct scanner sc;
+
+      scan_init (&sc, a3_rows, strlen (a3_rows), a3_scratch,
+                 sizeof a3_scratch);
+      while (sc.pos < sc.len && nbest < ORC_MAX_TOPOLOGIES)
+        {
+          char tbuf[ORC_MAX_TOPOLOGY + 1] = "";
+          char wbuf[32] = "";
+          double w = 0;
+          int slot = -1;
+
+          skip_ws (&sc);
+          if (peek (&sc) != '{')
+            break;
+          next (&sc);
+          skip_ws (&sc);
+          if (peek (&sc) != '}')
+            for (;;)
+              {
+                size_t kl = 0;
+                const char *k = parse_string (&sc, &kl);
+                size_t v0, v1;
+
+                if (k == NULL)
+                  break;
+                skip_ws (&sc);
+                if (next (&sc) != ':')
+                  break;
+                skip_ws (&sc);
+                if (skip_value (&sc, &v0, &v1) < 0)
+                  break;
+                if (kl == 8 && memcmp (k, "topology", 8) == 0)
+                  {
+                    size_t n = v1 - v0;
+
+                    if (n >= 2 && n - 2 < sizeof tbuf)
+                      {
+                        memcpy (tbuf, sc.s + v0 + 1, n - 2);
+                        tbuf[n - 2] = '\0';
+                      }
+                  }
+                else if (kl == 6 && memcmp (k, "weight", 6) == 0)
+                  {
+                    size_t n = v1 - v0;
+
+                    if (n < sizeof wbuf)
+                      {
+                        memcpy (wbuf, sc.s + v0, n);
+                        wbuf[n] = '\0';
+                      }
+                  }
+                skip_ws (&sc);
+                {
+                  int c = next (&sc);
+
+                  if (c == ',')
+                    {
+                      skip_ws (&sc);
+                      continue;
+                    }
+                  break;
+                }
+              }
+          w = atof (wbuf);
+          if (tbuf[0] != '\0')
+            {
+              /* keep the best distinct topologies by weight */
+              for (int b = 0; b < nbest; b++)
+                if (strcmp (best[b].topology, tbuf) == 0)
+                  {
+                    if (w > best[b].weight)
+                      best[b].weight = w;
+                    slot = -2;
+                    break;
+                  }
+              if (slot == -1 && nbest < ORC_MAX_TOPOLOGIES)
+                {
+                  strcpy (best[nbest].topology, tbuf);
+                  best[nbest].weight = w;
+                  nbest++;
+                }
+            }
+          skip_ws (&sc);
+          if (peek (&sc) == ',')
+            next (&sc);
+        }
+      /* sort by weight desc (insertion, small n) */
+      for (int a = 0; a < nbest; a++)
+        for (int b = a + 1; b < nbest; b++)
+          if (best[b].weight > best[a].weight)
+            {
+              double tw = best[a].weight;
+              char tt[ORC_MAX_TOPOLOGY + 1];
+
+              strcpy (tt, best[a].topology);
+              best[a].weight = best[b].weight;
+              strcpy (best[a].topology, best[b].topology);
+              best[b].weight = tw;
+              strcpy (best[b].topology, tt);
+            }
+      {
+        int k = desc->instances < nbest ? desc->instances : nbest;
+
+        for (int a = 0; a < k; a++)
+          {
+            strcpy (desc->topologies[desc->n_topologies++],
+                    best[a].topology);
+          }
+      }
+    }
+
+  if (desc->n_topologies == 0)
+    {
+      strcpy (desc->topologies[0], "8,16,4");
+      desc->n_topologies = 1;
+    }
+  desc->auto_topologies = false;
+}
+
+/* ---------------------------------------------------------------------
+ *  Phase A3: replay and history (the read half of the storage layer)
+ * ------------------------------------------------------------------- */
 
 /* scan_init — a scanner over a NUL-terminated buffer. */
 static void
@@ -848,6 +1223,11 @@ do_replay (long long run_id)
       return;
     }
 
+  /* Phase A4: the replayed instances are persisted with their
+   * scores, like any run (the weights are NOT updated: a replay
+   * must not learn from itself). */
+  persist_scored_instances (new_id, &req2.desc, &sched, &agg);
+
   /* Compare with the HISTORY: re-aggregate the stored run_instances
    * outputs of that run and compare the two aggregates. */
   {
@@ -993,6 +1373,36 @@ do_replay (long long run_id)
   }
 }
 
+/* do_watch (phase A4) — pure-POSIX state view: current run, recent
+ * incidents and recent runs from the storage read half. */
+static void
+do_watch (void)
+{
+  char cur[ORC_MAX_RESPONSE];
+  char inc[8192];
+  char runs[8192];
+  long ninc = 0, nruns = 0;
+  int w;
+
+  /* caller holds eng.lock */
+  (void) build_status_into (cur, sizeof cur);
+
+  inc[0] = '\0';
+  if (orc_storage_select (eng.storage, "incidents", NULL, NULL, 5,
+                          inc, sizeof inc, &ninc) != ORC_ST_OK)
+    inc[0] = '\0';
+  runs[0] = '\0';
+  if (orc_storage_select (eng.storage, "runs", NULL, NULL, 5,
+                          runs, sizeof runs, &nruns) != ORC_ST_OK)
+    runs[0] = '\0';
+
+  w = snprintf (eng.slot, sizeof eng.slot,
+                "{\"command\": \"watch\", \"run\": %s, "
+                "\"incidents\": [%s], \"runs\": [%s]}",
+                cur, inc, runs);
+  eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot ? (size_t) w : 0;
+}
+
 /* ---------------------------------------------------------------------
  *  Init and command processing
  * ------------------------------------------------------------------- */
@@ -1101,6 +1511,12 @@ orc_engine_process_line (const char *line, size_t len)
 
     case ORC_CMD_REPLAY:
       do_replay (req.run_id);
+      return 0;
+
+    case ORC_CMD_WATCH:
+      pthread_mutex_lock (&eng.lock);
+      do_watch ();
+      pthread_mutex_unlock (&eng.lock);
       return 0;
 
     default:

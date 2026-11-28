@@ -20,9 +20,9 @@ TESTS = test_contract test_engine test_cli.sh test_orchestrate.sh \
 check_PROGRAMS = test_contract test_engine
 
 test_contract_SOURCES = test_contract.c
-test_contract_LDADD = $(top_builddir)/src/liborchcore.a
+test_contract_LDADD = $(top_builddir)/src/liborchcore.a -lm
 
 test_engine_SOURCES = test_engine.c
-test_engine_LDADD = $(top_builddir)/src/liborchcore.a
+test_engine_LDADD = $(top_builddir)/src/liborchcore.a -lm
 
 EXTRA_DIST = test_cli.sh test_orchestrate.sh test_pg.sh

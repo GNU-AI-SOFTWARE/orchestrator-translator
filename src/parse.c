@@ -128,6 +128,8 @@ orc_parse (const char *line, size_t len,
             req->command = ORC_CMD_REPLAY;
           else if (strcmp (c, "history") == 0)
             req->command = ORC_CMD_HISTORY;
+          else if (strcmp (c, "watch") == 0)
+            req->command = ORC_CMD_WATCH;
           else
             {
               req->invalid = ORC_INVALID_VALUE;

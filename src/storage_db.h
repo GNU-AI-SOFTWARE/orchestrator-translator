@@ -41,6 +41,10 @@ enum orc_storage_status orc_db_write_incident (
                                         struct orc_db *db,
                                         const struct orc_incident_row *row,
                                         long long *id);
+enum orc_storage_status orc_db_write_aggregator (
+                                      struct orc_db *db,
+                                      const struct orc_aggregator_row *row,
+                                      long long *id);
 enum orc_storage_status orc_db_write_training (
                                         struct orc_db *db,
                                         const struct orc_training_row *row,

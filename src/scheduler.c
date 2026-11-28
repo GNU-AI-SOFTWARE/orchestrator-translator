@@ -110,47 +110,16 @@ orc_scheduler_run (struct orc_instio *io, struct orc_storage *st,
 
       o->ok = ok;
       {
-        struct orc_inst_row row;
-        char input_json[1024];
-        char output_json[ORC_MAX_OUTPUT * 16 + 4];
-        long long id = 0;
-
-        row.run_id = run_id;
-        row.topology = o->topology;
-        /* A failed render must never leave the stack buffer
-         * uninitialized: fall back to JSON null. */
-        if (orc_storage_json_vector (desc->input, desc->n_input, input_json,
-                                     sizeof input_json) == 0)
-          strcpy (input_json, "null");
-        row.input = input_json;
-        if (ok)
-          {
-            if (orc_storage_json_vector (o->out, o->n_out, output_json,
-                                         sizeof output_json) == 0)
-              strcpy (output_json, "null");
-            row.output = output_json;
-          }
-        else
-          row.output = NULL;
-        row.status = ok ? "ok" : "failed";
-
-        /* Durability from the first execution: the row is written
-         * as soon as the instance is collected.  A transport
-         * failure of /db fails the run as EIO — the caller keeps
-         * what was already persisted. */
-        if (orc_storage_write_instance (st, &row, &id) == ORC_ST_TRANSPORT)
-          {
-            errno = EIO;
-            return -1;
-          }
-        /* An INVALID/EMPTY answer of the base is a status: the
-         * instance row is simply not there, the run continues. */
+        /* Phase A4: the instance rows are persisted by the caller
+         * (engine worker / replay) once the aggregate — and thus the
+         * per-instance scores — is known.  Only the incident is
+         * journaled here. */
         if (!ok)
           {
             struct orc_incident_row inc;
 
             inc.run_id = run_id;
-            inc.instance_id = id;
+            inc.instance_id = 0;
             inc.kind = incident_kind != NULL ? incident_kind : "crash";
             orc_storage_write_incident (st, &inc, NULL);
           }

@@ -228,6 +228,33 @@ main (void)
   process ("{\"command\": \"replay\", \"run_id\": 999}");
   CHECK_STR (orc_engine_response (), "\"error\": \"not_found\"");
 
+  /* 10. Phase A4: instance rows carry scores, weights were learned. */
+  {
+    const struct orc_mem_state *mem =
+      orc_storage_mem_state (orc_engine_storage ());
+
+    CHECK (mem->instances[0].has_score == true);
+    CHECK (mem->instances[0].score > 0.9);      /* agrees with [1,1] */
+    CHECK (mem->instances[3].has_score == false); /* failed: no score */
+    CHECK (mem->n_aggregator >= 2);              /* 2,4,1 and 2,8,1 */
+  }
+
+  /* 11. Phase A4: watch is a pure-read state view. */
+  process ("{\"command\": \"watch\"}");
+  CHECK_STR (orc_engine_response (), "\"command\": \"watch\"");
+  CHECK_STR (orc_engine_response (), "\"run\": {");
+  CHECK_STR (orc_engine_response (), "\"incidents\": [");
+
+  /* 12. Phase A4: "topologies": "auto" picks the learned best. */
+  snprintf (command, sizeof command,
+            "{\"instances\": 2, \"topologies\": \"auto\","
+            " \"input\": [0.5, 0.3], \"aggregate\": \"majority\"}");
+  process_run (command);
+  CHECK_STR (orc_engine_response (), "\"state\": \"done\"");
+  process ("{\"command\": \"status\"}");
+  /* the learned weights rank 2,4,1 first (both runs used it most) */
+  CHECK_STR (orc_engine_response (), "\"topology\": \"2,4,1\"");
+
   orc_engine_shutdown ();
   /* Leave the tree exactly as we found it (distcheck checks). */
   for (int i = 1; i <= 4; i++)

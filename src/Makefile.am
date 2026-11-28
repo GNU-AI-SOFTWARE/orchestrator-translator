@@ -59,13 +59,13 @@ orchestrator_translator_SOURCES = netfs-hooks.c main-hurd.c
 orchestrator_translator_CPPFLAGS = $(AM_CPPFLAGS) -DON_HURD
 orchestrator_translator_LDADD = liborchcore.a -lnetfs -lfshelp -lports \
                                -lihash -liohelp -lmachuser -lpthread \
-                               -lshouldbeinlibc
+                               -lshouldbeinlibc -lm
 
 orchestrator_translator_repl_SOURCES = main.c
 orchestrator_translator_repl_CPPFLAGS = $(AM_CPPFLAGS)
-orchestrator_translator_repl_LDADD = liborchcore.a -lpthread
+orchestrator_translator_repl_LDADD = liborchcore.a -lpthread -lm
 else
 orchestrator_translator_SOURCES = main.c
 orchestrator_translator_CPPFLAGS = $(AM_CPPFLAGS)
-orchestrator_translator_LDADD = liborchcore.a -lpthread
+orchestrator_translator_LDADD = liborchcore.a -lpthread -lm
 endif

@@ -390,6 +390,14 @@ orc_db_write_instance (struct orc_db *db, const struct orc_inst_row *row,
   n = put_json_str (line, n, sizeof line, row->status);
   if (n == 0)
     return ORC_ST_INVALID;
+  if (row->has_score)                       /* phase A4 */
+    {
+      w = snprintf (line + n, sizeof line - n, ", \"score\": %.6f",
+                    row->score);
+      if (w < 0 || (size_t) w >= sizeof line - n)
+        return ORC_ST_INVALID;
+      n += (size_t) w;
+    }
   w = snprintf (line + n, sizeof line - n, "}}");
   if (w < 0 || (size_t) w >= sizeof line - n)
     return ORC_ST_INVALID;
@@ -546,4 +554,31 @@ orc_db_select (struct orc_db *db, const char *table,
     }
     return *count > 0 ? ORC_ST_OK : ORC_ST_EMPTY;
   }
+}
+
+/* Phase A4: one aggregator_state row (learned weight, versioned). */
+enum orc_storage_status
+orc_db_write_aggregator (struct orc_db *db,
+                         const struct orc_aggregator_row *row,
+                         long long *id)
+{
+  char line[1024];
+  size_t n;
+  int w;
+
+  w = snprintf (line, sizeof line,
+                "{\"table\": \"aggregator_state\", \"row\": "
+                "{\"topology\": ");
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->topology);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n,
+                ", \"weight\": %.6f, \"version\": %lld}}",
+                row->weight, row->version);
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  return db_submit (db, line, id);
 }

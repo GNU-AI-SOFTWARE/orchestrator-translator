@@ -43,6 +43,16 @@ struct orc_inst_row
     const char *input;              /* JSON array text */
     const char *output;             /* JSON array text or NULL */
     const char *status;             /* "ok" | "failed" */
+    bool        has_score;          /* phase A4: inter-instance agreement */
+    double      score;
+  };
+
+/* aggregator_state row (phase A4): learned per-topology weight. */
+struct orc_aggregator_row
+  {
+    const char *topology;
+    double      weight;
+    long long   version;
   };
 
 /* Supervisor failure history (PLAN.md phase 2): one row per
@@ -90,6 +100,10 @@ enum orc_storage_status orc_storage_write_incident (
                                     struct orc_storage *st,
                                     const struct orc_incident_row *row,
                                     long long *id);
+enum orc_storage_status orc_storage_write_aggregator (
+                                    struct orc_storage *st,
+                                    const struct orc_aggregator_row *row,
+                                    long long *id);
 enum orc_storage_status orc_storage_write_training (
                                     struct orc_storage *st,
                                     const struct orc_training_row *row,
@@ -129,7 +143,16 @@ struct orc_mem_state
         char input[512];
         char output[512];
         char status[16];
+        bool has_score;
+        double score;
       } instances[512];
+    struct
+      {
+        char topology[64];
+        double weight;
+        long long version;
+      } aggregator[64];
+    int n_aggregator;
     struct
       {
         long long run_id;

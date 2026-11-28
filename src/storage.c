@@ -108,9 +108,28 @@ mem_write_instance (struct orc_storage *st, const struct orc_inst_row *row,
             row->output != NULL ? row->output : "null");
   snprintf (m->instances[m->n_instances].status,
             sizeof m->instances[0].status, "%s", row->status);
+  m->instances[m->n_instances].has_score = row->has_score;
+  m->instances[m->n_instances].score = row->score;
   m->n_instances++;
   m->instances[m->n_instances - 1].run_id = row->run_id;
   *id = m->n_instances;
+  return ORC_ST_OK;
+}
+
+static enum orc_storage_status
+mem_write_aggregator (struct orc_storage *st,
+                      const struct orc_aggregator_row *row, long long *id)
+{
+  struct orc_mem_state *m = &st->mem;
+
+  if (m->n_aggregator >= 64)
+    return ORC_ST_INVALID;
+  snprintf (m->aggregator[m->n_aggregator].topology,
+            sizeof m->aggregator[0].topology, "%s", row->topology);
+  m->aggregator[m->n_aggregator].weight = row->weight;
+  m->aggregator[m->n_aggregator].version = row->version;
+  m->n_aggregator++;
+  *id = m->n_aggregator;
   return ORC_ST_OK;
 }
 
@@ -222,6 +241,32 @@ mem_select (struct orc_storage *st, const char *table,
           }
         }
     }
+  else if (strcmp (table, "aggregator_state") == 0)
+    {
+      for (int i = 0; i < m->n_aggregator && n < limit; i++)
+        {
+          char idbuf[24];
+
+          snprintf (idbuf, sizeof idbuf, "%d", i + 1);
+          if (where_col != NULL && strcmp (where_col, "topology") == 0
+              && strcmp (where_val, m->aggregator[i].topology) != 0)
+            continue;
+          {
+            int w = snprintf (out + len, cap - len,
+                              "%s{\"id\": %s, \"topology\": \"%s\", "
+                              "\"weight\": %.6f, \"version\": %lld}",
+                              n > 0 ? "," : "", idbuf,
+                              m->aggregator[i].topology,
+                              m->aggregator[i].weight,
+                              m->aggregator[i].version);
+
+            if (w < 0 || (size_t) w >= cap - len)
+              break;
+            len += (size_t) w;
+            n++;
+          }
+        }
+    }
   else
     return ORC_ST_INVALID;
 
@@ -270,6 +315,16 @@ orc_storage_write_training (struct orc_storage *st,
   if (st->mode == 1)
     return orc_db_write_training (&st->db, row, id);
   return mem_write_training (st, row, id);
+}
+
+enum orc_storage_status
+orc_storage_write_aggregator (struct orc_storage *st,
+                              const struct orc_aggregator_row *row,
+                              long long *id)
+{
+  if (st->mode == 1)
+    return orc_db_write_aggregator (&st->db, row, id);
+  return mem_write_aggregator (st, row, id);
 }
 
 enum orc_storage_status

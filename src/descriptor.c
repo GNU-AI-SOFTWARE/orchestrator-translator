@@ -151,13 +151,32 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
         }
       else if (strcmp (keybuf, "topologies") == 0)
         {
-          if (peek (sc) != '[')
+          if (peek (sc) == '"')
             {
-              req->invalid = ORC_INVALID_TYPE;
-              set_detail (req, "topologies");
-              return -1;
+              /* phase A4: "auto" selects the best topologies of the
+               * history at submit time. */
+              const char *t;
+              size_t tlen = 0;
+
+              t = parse_string (sc, &tlen);
+              if (t == NULL || tlen != 4 || memcmp (t, "auto", 4) != 0)
+                {
+                  req->invalid = ORC_INVALID_VALUE;
+                  set_detail (req, "topologies");
+                  return -1;
+                }
+              d->auto_topologies = true;
+              have_topologies = true;
             }
-          sc->pos++;
+          else
+            {
+              if (peek (sc) != '[')
+                {
+                  req->invalid = ORC_INVALID_TYPE;
+                  set_detail (req, "topologies");
+                  return -1;
+                }
+              sc->pos++;
           skip_ws (sc);
           if (peek (sc) == ']')
             {
@@ -195,6 +214,7 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
                   req->invalid = ORC_INVALID_JSON;
                   return -1;
                 }
+              }
             }
           have_topologies = true;
         }
@@ -300,7 +320,7 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
       set_detail (req, "instances");
       return -1;
     }
-  if (!have_topologies || d->n_topologies == 0)
+  if (!have_topologies || (!d->auto_topologies && d->n_topologies == 0))
     {
       req->invalid = ORC_INVALID_FIELD;
       set_detail (req, "topologies");
