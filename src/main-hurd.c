@@ -33,7 +33,7 @@ typedef mach_port_t *processor_name_array_t;
 
 #include <hurd.h>
 #include <hurd/ports.h>
-#include <hurd/trivfs.h>
+#include <hurd/netfs.h>
 #include <hurd/fsys.h>
 
 #include <argp.h>
@@ -44,9 +44,9 @@ typedef mach_port_t *processor_name_array_t;
 
 #include "orchestrate.h"
 
-/* trivfs requirement: the control structure filled by
- * trivfs_startup(). */
-struct trivfs_control *fsys;
+/* netfs (phase A1b): the fixed node tree is built by
+ * orc_netfs_init_tree() (netfs-hooks.c) before netfs_startup. */
+void orc_netfs_init_tree (void);
 
 const char *argp_program_version = "orchestrator-translator (GNU AI) "
                                     VERSION;
@@ -131,27 +131,34 @@ static struct argp argp = { options, parse_opt, 0, doc, 0, 0, 0 };
 int
 main (int argc, char *argv[])
 {
-  error_t err;
   mach_port_t bootstrap;
 
   argp_parse (&argp, argc, argv, 0, 0, 0);
 
-  /* Init the engine BEFORE replying to settrans: when the mount
-   * returns, the transports and the storage are ready. */
-  if (orc_engine_init (&cfg) < 0)
-    error (1, errno, "initializing the orchestration engine");
+  /* libnetfs first, exactly like httpfs/inference: the tree and the
+   * port buckets exist before settrans is answered.  The engine is
+   * initialized only AFTER netfs_startup: until the startup RPC is
+   * done, this process has no root port, so opening /db or mounting
+   * /llm<N> would send filesystem RPCs on the bootstrap port and
+   * corrupt the handshake. */
+  netfs_init ();
+  orc_netfs_init_tree ();
 
   task_get_bootstrap_port (mach_task_self (), &bootstrap);
   if (bootstrap == MACH_PORT_NULL)
     error (1, 0, "Must be started as a translator");
 
-  err = trivfs_startup (bootstrap, 0, 0, 0, 0, 0, &fsys);
-  mach_port_deallocate (mach_task_self (), bootstrap);
-  if (err)
-    error (3, err, "Contacting parent failed");
+  /* NB: the return value of netfs_startup is the reply's retry port
+   * name, not an error code — httpfs and inference-translator ignore
+   * it, and so do we.  Failures inside netfs_startup are fatal via
+   * error() before it returns. */
+  netfs_startup (bootstrap, 0);
 
-  ports_manage_port_operations_one_thread (fsys->pi.bucket,
-                                           trivfs_demuxer, 0);
+  /* Now the root port is ours: transports and storage can open. */
+  if (orc_engine_init (&cfg) < 0)
+    error (1, errno, "initializing the orchestration engine");
+
+  netfs_server_loop ();                      /* never returns */
 
   orc_engine_shutdown ();
   return 0;

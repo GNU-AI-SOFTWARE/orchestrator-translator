@@ -55,10 +55,11 @@ bin_PROGRAMS = orchestrator-translator
 if ON_HURD
 bin_PROGRAMS += orchestrator-translator-repl
 
-orchestrator_translator_SOURCES = trivfs-hooks.c main-hurd.c
+orchestrator_translator_SOURCES = netfs-hooks.c main-hurd.c
 orchestrator_translator_CPPFLAGS = $(AM_CPPFLAGS) -DON_HURD
-orchestrator_translator_LDADD = liborchcore.a -ltrivfs -lfshelp \
-                               -lports -lshouldbeinlibc -lpthread
+orchestrator_translator_LDADD = liborchcore.a -lnetfs -lfshelp -lports \
+                               -lihash -liohelp -lmachuser -lpthread \
+                               -lshouldbeinlibc
 
 orchestrator_translator_repl_SOURCES = main.c
 orchestrator_translator_repl_CPPFLAGS = $(AM_CPPFLAGS)

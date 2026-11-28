@@ -56,4 +56,10 @@ size_t orc_engine_response_len (void);
  * the rows the run persisted (the mem backend). */
 struct orc_storage *orc_engine_storage (void);
 
+/* netfs views (A1b): build the trio type 2 / type 3 JSON into BUF,
+ * one fresh build per call.  Returns the length, 0 when it does
+ * not fit.  Thread-safe. */
+size_t orc_engine_build_status (char *buf, size_t cap);
+size_t orc_engine_build_result (char *buf, size_t cap);
+
 #endif /* ORC_ORCHESTRATE_H */

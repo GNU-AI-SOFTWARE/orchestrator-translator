@@ -111,33 +111,28 @@ slot_set (size_t len)
  *  Status and result (the trio JSON, SPEC.md section 7)
  * ------------------------------------------------------------------- */
 
-static void
-build_status (void)
+/* Build the status JSON (trio type 2) into BUF; returns the length,
+ * 0 when it does not fit.  The caller holds eng.lock. */
+static size_t
+build_status_into (char *buf, size_t cap)
 {
   size_t n = 0;
   int w;
 
   if (!eng.has_run)
     {
-      w = snprintf (eng.slot, sizeof eng.slot,
-                    "{\"run_id\": 0, \"state\": \"idle\","
-                    " \"instances\": []}");
-      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
-                       ? (size_t) w : 0;
-      return;
+      w = snprintf (buf, cap, "{\"run_id\": 0, \"state\": \"idle\","
+                   " \"instances\": []}");
+      return w > 0 && (size_t) w < cap ? (size_t) w : 0;
     }
 
   const char *state = eng.run_state == RUN_DONE ? "done"
                       : eng.run_state == RUN_RUNNING ? "running" : "failed";
 
-  w = snprintf (eng.slot, sizeof eng.slot,
-                "{\"run_id\": %lld, \"state\": \"%s\", \"instances\": [",
-                eng.run_id, state);
-  if (w < 0 || (size_t) w >= sizeof eng.slot)
-    {
-      eng.slot_len = 0;
-      return;
-    }
+  w = snprintf (buf, cap, "{\"run_id\": %lld, \"state\": \"%s\", \"instances\": [",
+               eng.run_id, state);
+  if (w < 0 || (size_t) w >= cap)
+    return 0;
   n = (size_t) w;
 
   for (int i = 0; i < eng.n_instances; i++)
@@ -145,31 +140,33 @@ build_status (void)
       char esc[ORC_MAX_TOPOLOGY * 6 + 1];
 
       json_escape (eng.inst[i].topology, esc, sizeof esc);
-      if (i > 0 && n + 1 < sizeof eng.slot)
-        eng.slot[n++] = ',';
-      w = snprintf (eng.slot + n, sizeof eng.slot - n,
+      if (i > 0 && n + 1 < cap)
+        buf[n++] = ',';
+      w = snprintf (buf + n, cap - n,
                     "{\"id\": %d, \"topology\": \"%s\","
                     " \"state\": \"%s\"}",
                     i + 1, esc,
                     eng.inst[i].ok ? "done" : "failed");
-      if (w < 0 || (size_t) w >= sizeof eng.slot - n)
-        {
-          eng.slot_len = 0;
-          return;
-        }
+      if (w < 0 || (size_t) w >= cap - n)
+        return 0;
       n += (size_t) w;
     }
-  w = snprintf (eng.slot + n, sizeof eng.slot - n, "]}");
-  if (w < 0 || (size_t) w >= sizeof eng.slot - n)
-    {
-      eng.slot_len = 0;
-      return;
-    }
-  eng.slot_len = n + (size_t) w;
+  w = snprintf (buf + n, cap - n, "]}");
+  if (w < 0 || (size_t) w >= cap - n)
+    return 0;
+  return n + (size_t) w;
 }
 
 static void
-build_result (void)
+build_status (void)
+{
+  eng.slot_len = build_status_into (eng.slot, sizeof eng.slot);
+}
+
+/* Build the result JSON (trio type 3) into BUF; returns the length,
+ * 0 when it does not fit.  The caller holds eng.lock. */
+static size_t
+build_result_into (char *buf, size_t cap)
 {
   /* The aggregated vector, serialized as a string (the trio type
    * 3 keeps "output" a string; the richer synthesis belongs to
@@ -183,7 +180,7 @@ build_result (void)
         {
           /* A running or failed run has no aggregate yet: an
            * honest state, not an empty result. */
-          w = snprintf (eng.slot, sizeof eng.slot,
+          w = snprintf (buf, cap,
                         "{\"run_id\": %lld, \"state\": \"%s\","
                         " \"aggregate_strategy\": \"%s\","
                         " \"output\": \"\", \"confidence\": 0}",
@@ -192,25 +189,25 @@ build_result (void)
                         eng.strategy);
         }
       else
-        w = snprintf (eng.slot, sizeof eng.slot, "{\"empty\": true}");
-      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
-                       ? (size_t) w : 0;
-      return;
+        w = snprintf (buf, cap, "{\"empty\": true}");
+      return w > 0 && (size_t) w < cap ? (size_t) w : 0;
     }
 
   if (orc_storage_json_vector (eng.agg.out, eng.agg.n, outbuf,
                                sizeof outbuf) == 0)
-    {
-      eng.slot_len = 0;
-      return;
-    }
-  w = snprintf (eng.slot, sizeof eng.slot,
+    return 0;
+  w = snprintf (buf, cap,
                 "{\"run_id\": %lld, \"state\": \"done\","
                 " \"aggregate_strategy\": \"%s\","
                 " \"output\": \"%s\", \"confidence\": %.3f}",
                 eng.run_id, eng.strategy, outbuf, eng.agg.confidence);
-  eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
-                   ? (size_t) w : 0;
+  return w > 0 && (size_t) w < cap ? (size_t) w : 0;
+}
+
+static void
+build_result (void)
+{
+  eng.slot_len = build_result_into (eng.slot, sizeof eng.slot);
 }
 
 /* ---------------------------------------------------------------------
@@ -224,7 +221,10 @@ build_result (void)
 static void *
 run_worker (void *arg)
 {
-  struct orc_descriptor desc = *(struct orc_descriptor *) arg;
+  /* 64 KiB raw descriptor: keep it off the (small) thread stack.
+   * One run at a time (busy reject), so a static is safe. */
+  static struct orc_descriptor desc;
+  desc = *(struct orc_descriptor *) arg;
   struct orc_sched_result sched;
   struct orc_aggregate agg;
   long long run_id;
@@ -524,7 +524,8 @@ do_fetch_run (const struct orc_request *req)
   size_t blen = 0;
   double vec[ORC_MAX_INPUT];
   int nvec = 0;
-  struct orc_descriptor desc = req->desc;
+  static struct orc_descriptor desc;   /* 64 KiB raw: off the stack */
+  desc = req->desc;
   int rc;
 
   if (fetch_url (req->url, &status, &id, &blen, vec, &nvec) < 0)
@@ -578,7 +579,11 @@ orc_engine_shutdown (void)
 int
 orc_engine_process_line (const char *line, size_t len)
 {
-  struct orc_request req;
+  /* struct orc_request carries the 64 KiB raw descriptor: never on
+   * the stack — the netfs demuxer thread runs on a small stack and a
+   * 72 KiB memset there segfaults.  The command path is single
+   * threaded (one demuxer, one REPL loop), so a static is safe. */
+  static struct orc_request req;
   int rc;
 
   while (len > 0 && line[len - 1] == '\r')
@@ -661,4 +666,29 @@ struct orc_storage *
 orc_engine_storage (void)
 {
   return eng.storage;
+}
+
+/* Public builders for the netfs file views (A1b): the netfs hooks
+ * serve /orchestrate/status and /orchestrate/result straight from
+ * the engine, one build per read, no shared cursor. */
+size_t
+orc_engine_build_status (char *buf, size_t cap)
+{
+  size_t n;
+
+  pthread_mutex_lock (&eng.lock);
+  n = build_status_into (buf, cap);
+  pthread_mutex_unlock (&eng.lock);
+  return n;
+}
+
+size_t
+orc_engine_build_result (char *buf, size_t cap)
+{
+  size_t n;
+
+  pthread_mutex_lock (&eng.lock);
+  n = build_result_into (buf, cap);
+  pthread_mutex_unlock (&eng.lock);
+  return n;
 }
