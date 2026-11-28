@@ -306,7 +306,7 @@ parse_descriptor (struct scanner *sc, struct orc_request *req)
       set_detail (req, "topologies");
       return -1;
     }
-  if (!have_input || d->n_input == 0)
+  if ((!have_input || d->n_input == 0) && !req->input_optional)
     {
       req->invalid = ORC_INVALID_FIELD;
       set_detail (req, "input");

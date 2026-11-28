@@ -21,6 +21,39 @@
 
 #include "neuron.h"
 
+/* One attempt at collecting the output of instance ID: mount or
+ * open, write topology, write input, read the state text.  Returns
+ * true and fills OUT/N_OUT when an output vector was collected. */
+static bool
+try_instance (struct orc_instio *io, int id, const char *topology,
+              const char *input_line, char *text, size_t text_cap,
+              double *out, int *n_out)
+{
+  struct orc_inst inst;
+  long len;
+
+  if (orc_inst_begin (io, id, &inst) < 0)
+    return false;
+  if (orc_inst_write (&inst, topology) < 0)
+    {
+      orc_inst_end (&inst);
+      return false;
+    }
+  if (orc_inst_write (&inst, input_line) < 0)
+    {
+      orc_inst_end (&inst);
+      return false;
+    }
+  len = orc_inst_read (&inst, text, text_cap);
+  orc_inst_end (&inst);
+  if (len < 0)
+    return false;
+  text[len < (long) text_cap ? len : (long) text_cap - 1] = '\0';
+  *n_out = orc_neuron_parse_outputs (text, (size_t) len, out,
+                                     ORC_MAX_OUTPUT);
+  return *n_out > 0;
+}
+
 int
 orc_scheduler_run (struct orc_instio *io, struct orc_storage *st,
                    const struct orc_descriptor *desc,
@@ -42,51 +75,45 @@ orc_scheduler_run (struct orc_instio *io, struct orc_storage *st,
 
   for (int i = 0; i < desc->instances; i++)
     {
-      struct orc_inst inst;
       struct orc_inst_out *o = &res->inst[i];
       const char *topology =
         desc->topologies[i % desc->n_topologies];
-      long len;
       int n_out = -1;
       bool ok = false;
+      const char *incident_kind = NULL;
 
       strcpy (o->topology, topology);
 
-      if (orc_inst_begin (io, i + 1, &inst) < 0)
-        goto persist;                       /* transport: EIO below */
-      if (orc_inst_write (&inst, topology) < 0)
+      /* Supervisor (PLAN phase 2): one restart per failed instance,
+       * each failure persisted in the incidents table. */
+      ok = try_instance (io, i + 1, topology, input_line, text,
+                         sizeof text, out, &n_out);
+      if (!ok)
         {
-          orc_inst_end (&inst);
-          goto persist;
+          struct orc_incident_row inc;
+
+          inc.run_id = run_id;
+          inc.instance_id = 0;
+          inc.kind = "crash";
+          orc_storage_write_incident (st, &inc, NULL);
+          ok = try_instance (io, i + 1, topology, input_line, text,
+                             sizeof text, out, &n_out);
+          if (!ok)
+            incident_kind = "restart";
         }
-      if (orc_inst_write (&inst, input_line) < 0)
+      if (ok)
         {
-          orc_inst_end (&inst);
-          goto persist;
-        }
-      len = orc_inst_read (&inst, text, sizeof text);
-      orc_inst_end (&inst);
-      if (len < 0)
-        goto persist;
-      text[len < (long) sizeof text ? len : (long) sizeof text - 1]
-        = '\0';
-      n_out = orc_neuron_parse_outputs (text, (size_t) len, out,
-                                        ORC_MAX_OUTPUT);
-      if (n_out > 0)
-        {
-          ok = true;
           o->n_out = n_out;
           memcpy (o->out, out, (size_t) n_out * sizeof *out);
           res->n_ok++;
         }
 
-    persist:
       o->ok = ok;
       {
         struct orc_inst_row row;
         char input_json[1024];
         char output_json[ORC_MAX_OUTPUT * 16 + 4];
-        long long id;
+        long long id = 0;
 
         row.run_id = run_id;
         row.topology = o->topology;
@@ -117,9 +144,16 @@ orc_scheduler_run (struct orc_instio *io, struct orc_storage *st,
             return -1;
           }
         /* An INVALID/EMPTY answer of the base is a status: the
-         * instance row is simply not there, the run continues
-         * (the incident would be persisted by the supervisor of
-         * phase 2). */
+         * instance row is simply not there, the run continues. */
+        if (!ok)
+          {
+            struct orc_incident_row inc;
+
+            inc.run_id = run_id;
+            inc.instance_id = id;
+            inc.kind = incident_kind != NULL ? incident_kind : "crash";
+            orc_storage_write_incident (st, &inc, NULL);
+          }
       }
     }
 

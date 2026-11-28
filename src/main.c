@@ -39,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "orchestrate.h"
 #include "storage.h"
@@ -73,6 +74,8 @@ print_help (void)
             " | mem\n");
     printf ("      --conninfo STR  libpq string handed to the"
             " dbexec child\n");
+    printf ("      --httpfs PATH   httpfs binary used by the"
+            " fetch command\n");
     printf ("\n");
     printf ("On GNU/Hurd, the binary is the /orchestrate"
             " translator:\n");
@@ -122,6 +125,8 @@ handle_options (int argc, char *argv[], struct orc_config *cfg)
                 cfg->storage = argv[++i];
             else if (strcmp (argv[i], "--conninfo") == 0)
                 cfg->conninfo = argv[++i];
+            else if (strcmp (argv[i], "--httpfs") == 0)
+                cfg->httpfs = argv[++i];
             else
                 {
                     fprintf (stderr, "orchestrator-translator:"
@@ -170,8 +175,30 @@ main (int argc, char *argv[])
                 }
             else
                 {
-                    fwrite (orc_engine_response (), 1,
-                            orc_engine_response_len (), stdout);
+                    /* Phase 2 runs are asynchronous: the write of a
+                     * descriptor answers "submitted".  The REPL is
+                     * the verification face of the engine, so it
+                     * waits for the run to finish and serves the
+                     * final result line — the same contract the
+                     * phase 1 tests assert. */
+                    const char *resp = orc_engine_response ();
+
+                    if (strstr (resp, "\"state\": \"submitted\"") != NULL)
+                        {
+                            for (int tries = 0; tries < 500; tries++)
+                                {
+                                    orc_engine_process_line (
+                                        "{\"command\": \"result\"}",
+                                        strlen ("{\"command\": \"result\"}"));
+                                    resp = orc_engine_response ();
+                                    if (strstr (resp, "\"state\": \"done\"")
+                                        || strstr (resp,
+                                                   "\"state\": \"failed\""))
+                                        break;
+                                    usleep (10000);
+                                }
+                        }
+                    fwrite (resp, 1, orc_engine_response_len (), stdout);
                     fputc ('\n', stdout);
                     fflush (stdout);
                 }

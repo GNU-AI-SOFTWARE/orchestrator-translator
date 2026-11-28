@@ -114,6 +114,43 @@ mem_write_instance (struct orc_storage *st, const struct orc_inst_row *row,
   return ORC_ST_OK;
 }
 
+static enum orc_storage_status
+mem_write_incident (struct orc_storage *st, const struct orc_incident_row *row,
+                    long long *id)
+{
+  struct orc_mem_state *m = &st->mem;
+
+  if (m->n_incidents >= 128)
+    return ORC_ST_INVALID;
+  m->incidents[m->n_incidents].run_id = row->run_id;
+  m->incidents[m->n_incidents].instance_id = row->instance_id;
+  snprintf (m->incidents[m->n_incidents].kind,
+            sizeof m->incidents[0].kind, "%s", row->kind);
+  m->n_incidents++;
+  if (id != NULL)
+    *id = m->n_incidents;
+  return ORC_ST_OK;
+}
+
+static enum orc_storage_status
+mem_write_training (struct orc_storage *st, const struct orc_training_row *row,
+                    long long *id)
+{
+  struct orc_mem_state *m = &st->mem;
+
+  if (m->n_training >= 256)
+    return ORC_ST_INVALID;
+  snprintf (m->training[m->n_training].source_url,
+            sizeof m->training[0].source_url, "%s", row->source_url);
+  m->training[m->n_training].http_status = row->http_status;
+  snprintf (m->training[m->n_training].checksum,
+            sizeof m->training[0].checksum, "%s", row->checksum);
+  m->n_training++;
+  if (id != NULL)
+    *id = m->n_training;
+  return ORC_ST_OK;
+}
+
 /* --- Dispatch -------------------------------------------------------- */
 
 enum orc_storage_status
@@ -133,6 +170,26 @@ orc_storage_write_instance (struct orc_storage *st,
   if (st->mode == 1)
     return orc_db_write_instance (&st->db, row, id);
   return mem_write_instance (st, row, id);
+}
+
+enum orc_storage_status
+orc_storage_write_incident (struct orc_storage *st,
+                            const struct orc_incident_row *row,
+                            long long *id)
+{
+  if (st->mode == 1)
+    return orc_db_write_incident (&st->db, row, id);
+  return mem_write_incident (st, row, id);
+}
+
+enum orc_storage_status
+orc_storage_write_training (struct orc_storage *st,
+                            const struct orc_training_row *row,
+                            long long *id)
+{
+  if (st->mode == 1)
+    return orc_db_write_training (&st->db, row, id);
+  return mem_write_training (st, row, id);
 }
 
 const struct orc_mem_state *

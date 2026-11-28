@@ -82,6 +82,29 @@ process (const char *line)
     }
 }
 
+/* Submit a run descriptor and wait for the asynchronous run to
+ * finish (phase 2: the write answers "submitted", the worker
+ * thread publishes the final state).  Leaves the RESULT slot in
+ * the engine, like a reader of /orchestrate would see. */
+static void
+process_run (const char *line)
+{
+  int tries;
+
+  process (line);
+  CHECK_STR (orc_engine_response (), "\"state\": \"submitted\"");
+  for (tries = 0; tries < 500; tries++)
+    {
+      process ("{\"command\": \"result\"}");
+      if (strstr (orc_engine_response (), "\"state\": \"done\"")
+          || strstr (orc_engine_response (), "\"state\": \"failed\""))
+        return;
+      usleep (10000);
+    }
+  printf ("test_engine: FAIL: run did not finish in 5s\n");
+  checks_failed++;
+}
+
 int
 main (void)
 {
@@ -138,7 +161,7 @@ main (void)
   snprintf (command, sizeof command,
             "{\"instances\": 4, \"topologies\": [\"2,4,1\", \"2,8,1\"],"
             " \"input\": [0.5, 0.3], \"aggregate\": \"majority\"}");
-  process (command);
+  process_run (command);
   CHECK_STR (orc_engine_response (), "\"run_id\": 1");
   CHECK_STR (orc_engine_response (), "\"aggregate_strategy\": \"majority\"");
   CHECK_STR (orc_engine_response (), "\"output\": \"[1,1]\"");

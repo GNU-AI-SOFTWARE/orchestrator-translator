@@ -23,7 +23,9 @@ liborchcore_a_SOURCES = \
     storage_db.c \
     scheduler.c \
     aggregator.c \
-    orchestrate.c
+    orchestrate.c \
+    sha256.c \
+    tokenize.c
 
 noinst_HEADERS = \
     contract.h \
@@ -34,7 +36,9 @@ noinst_HEADERS = \
     storage_db.h \
     scheduler.h \
     aggregator.h \
-    orchestrate.h
+    orchestrate.h \
+    sha256.h \
+    tokenize.h
 
 AM_CPPFLAGS = -I$(top_srcdir)/src
 AM_CFLAGS = $(C23_CFLAGS) -Wall -Wextra
@@ -54,13 +58,13 @@ bin_PROGRAMS += orchestrator-translator-repl
 orchestrator_translator_SOURCES = trivfs-hooks.c main-hurd.c
 orchestrator_translator_CPPFLAGS = $(AM_CPPFLAGS) -DON_HURD
 orchestrator_translator_LDADD = liborchcore.a -ltrivfs -lfshelp \
-                               -lports -lshouldbeinlibc
+                               -lports -lshouldbeinlibc -lpthread
 
 orchestrator_translator_repl_SOURCES = main.c
 orchestrator_translator_repl_CPPFLAGS = $(AM_CPPFLAGS)
-orchestrator_translator_repl_LDADD = liborchcore.a
+orchestrator_translator_repl_LDADD = liborchcore.a -lpthread
 else
 orchestrator_translator_SOURCES = main.c
 orchestrator_translator_CPPFLAGS = $(AM_CPPFLAGS)
-orchestrator_translator_LDADD = liborchcore.a
+orchestrator_translator_LDADD = liborchcore.a -lpthread
 endif

@@ -40,7 +40,7 @@ fail() { say "test_pg: FAIL: $*"; FAIL=1; }
 cleanup()
 {
     if [ -n "$CLUSTER" ] && [ -d "$CLUSTER" ]; then
-        pg_ctl -D "$CLUSTER" stop -m immediate >/dev/null 2>&1
+        $ASPG pg_ctl -D "$CLUSTER" stop -m immediate >/dev/null 2>&1
     fi
     [ -n "$WORK" ] && rm -rf "$WORK"
 }
@@ -80,9 +80,20 @@ PORT=5498
 CONNINFO="host=127.0.0.1 port=$PORT dbname=gnuai user=gnuai"
 
 mkdir -p "$WORK/sock" "$WORK/inst"
-initdb -D "$CLUSTER" -U gnuai --auth=trust >/dev/null 2>&1 \
+# initdb/pg_ctl refuse to run as root: when the suite runs as root,
+# hand the disposable cluster to the unprivileged postgres user.
+ASPG=""
+if [ "$(id -u)" = "0" ] && id postgres >/dev/null 2>&1; then
+    chown -R postgres:postgres "$WORK"
+    ASPG="runuser -u postgres --"
+fi
+# initdb rejects the guest unset/invalid locale
+LC_ALL=C
+export LC_ALL
+
+$ASPG initdb -D "$CLUSTER" -U gnuai --auth=trust >/dev/null 2>&1 \
     || { say "test_pg: FAIL: initdb"; exit 1; }
-pg_ctl -D "$CLUSTER" -l "$WORK/postgres.log" \
+$ASPG pg_ctl -D "$CLUSTER" -l "$WORK/postgres.log" \
     -o "-p $PORT -c listen_addresses=127.0.0.1 -c fsync=off -c unix_socket_directories=$WORK/sock" \
     -w start >/dev/null 2>&1 \
     || { say "test_pg: FAIL: starting the cluster"; exit 1; }

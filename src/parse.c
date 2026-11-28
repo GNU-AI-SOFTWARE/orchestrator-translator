@@ -30,6 +30,7 @@ orc_parse (const char *line, size_t len,
   bool have_command = false;
   bool have_run = false;
   bool have_descriptor_keys = false;
+  bool have_url = false;
 
   memset (req, 0, sizeof *req);
   req->command = ORC_CMD_INVALID;
@@ -116,6 +117,13 @@ orc_parse (const char *line, size_t len,
             req->command = ORC_CMD_STATUS;
           else if (strcmp (c, "result") == 0)
             req->command = ORC_CMD_RESULT;
+          else if (strcmp (c, "fetch") == 0)
+            req->command = ORC_CMD_FETCH;
+          else if (strcmp (c, "fetch_run") == 0)
+            {
+              req->command = ORC_CMD_FETCH_RUN;
+              req->input_optional = true;   /* input comes from the URL */
+            }
           else
             {
               req->invalid = ORC_INVALID_VALUE;
@@ -123,6 +131,27 @@ orc_parse (const char *line, size_t len,
               return;
             }
           have_command = true;
+        }
+      else if (strcmp (keybuf, "url") == 0)
+        {
+          const char *u;
+          size_t ulen = 0;
+
+          u = parse_string (&sc, &ulen);
+          if (u == NULL)
+            {
+              req->invalid = ORC_INVALID_JSON;
+              return;
+            }
+          if (ulen >= sizeof req->url)
+            {
+              req->invalid = ORC_INVALID_TOOLONG;
+              set_detail (req, "url");
+              return;
+            }
+          memcpy (req->url, u, ulen);
+          req->url[ulen] = '\0';
+          have_url = true;
         }
       else if (strcmp (keybuf, "instances") == 0
                || strcmp (keybuf, "topologies") == 0
@@ -187,6 +216,10 @@ orc_parse (const char *line, size_t len,
     {
       if (have_command)
         {
+          /* fetch_run pairs a command with a nested run (the input
+           * is fetched, not given). */
+          if (req->command == ORC_CMD_FETCH_RUN && have_run && have_url)
+            return;
           req->invalid = ORC_INVALID_KEY;
           set_detail (req, "command");
           return;
@@ -195,7 +228,26 @@ orc_parse (const char *line, size_t len,
       return;
     }
   if (have_command)
-    return;                                 /* STATUS or RESULT */
+    {
+      /* fetch needs its url; fetch_run without a run is a fetch. */
+      if (req->command == ORC_CMD_FETCH && !have_url)
+        {
+          req->invalid = ORC_INVALID_FIELD;
+          set_detail (req, "url");
+          return;
+        }
+      if (req->command == ORC_CMD_FETCH_RUN)
+        {
+          if (!have_url)
+            {
+              req->invalid = ORC_INVALID_FIELD;
+              set_detail (req, "url");
+              return;
+            }
+          req->command = ORC_CMD_FETCH;     /* no run: plain fetch */
+        }
+      return;                                 /* STATUS/RESULT/FETCH */
+    }
 
   req->invalid = ORC_INVALID_FIELD;
   set_detail (req, "run");

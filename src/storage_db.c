@@ -246,6 +246,12 @@ interpret (const char *resp, long long *id)
 {
   long long v = 0;
 
+  if (id == NULL)
+    {
+      static long long sink;
+
+      id = &sink;
+    }
   *id = 0;
   if (strncmp (resp, "{\"ok\": true, \"id\":", 18) == 0)
     {
@@ -382,6 +388,84 @@ orc_db_write_instance (struct orc_db *db, const struct orc_inst_row *row,
     return ORC_ST_INVALID;
   n += (size_t) w;
   n = put_json_str (line, n, sizeof line, row->status);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n, "}}");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  return db_submit (db, line, id);
+}
+
+/* training_data rows carry fetched content: the /db phase-1 contract
+ * bounds one instruction at 256 Kio, so the line buffer is sized
+ * accordingly (static: the write path never allocates). */
+#define ORC_DB_TRAIN_LINE_MAX (280u * 1024u)
+
+enum orc_storage_status
+orc_db_write_training (struct orc_db *db, const struct orc_training_row *row,
+                       long long *id)
+{
+  static char line[ORC_DB_TRAIN_LINE_MAX];
+  size_t n;
+  int w;
+
+  w = snprintf (line, sizeof line,
+                "{\"table\": \"training_data\", \"row\": "
+                "{\"source_url\": ");
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->source_url);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n,
+                ", \"http_status\": %ld, \"content\": ", row->http_status);
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  n += (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->content);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n, ", \"checksum\": ");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  n += (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->checksum);
+  if (n == 0)
+    return ORC_ST_INVALID;
+  w = snprintf (line + n, sizeof line - n, "}}");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  return db_submit (db, line, id);
+}
+
+enum orc_storage_status
+orc_db_write_incident (struct orc_db *db, const struct orc_incident_row *row,
+                       long long *id)
+{
+  char line[ORC_DB_LINE_MAX];
+  size_t n;
+  int w;
+
+  w = snprintf (line, sizeof line,
+                "{\"table\": \"incidents\", \"row\": "
+                "{\"run_id\": %lld, \"instance_id\": ",
+                row->run_id);
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  if (row->instance_id > 0)
+    w = snprintf (line + n, sizeof line - n, "%lld", row->instance_id);
+  else
+    w = snprintf (line + n, sizeof line - n, "null");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  n += (size_t) w;
+  w = snprintf (line + n, sizeof line - n, ", \"kind\": ");
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+  n += (size_t) w;
+  n = put_json_str (line, n, sizeof line, row->kind);
   if (n == 0)
     return ORC_ST_INVALID;
   w = snprintf (line + n, sizeof line - n, "}}");

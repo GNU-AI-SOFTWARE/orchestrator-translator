@@ -33,6 +33,7 @@ struct orc_config
     bool mount;
     const char *storage;
     const char *conninfo;
+    const char *httpfs;       /* phase 3: httpfs binary for fetch */
   };
 
 /* Init from a configuration; the initial response slot is the

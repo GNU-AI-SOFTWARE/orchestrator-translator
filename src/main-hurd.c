@@ -83,6 +83,10 @@ static struct argp_option options[] = {
   {"storage", 's', "SPEC", 0,
    "storage backend: db:/db (default), dbexec:<bin> or mem"
    " (tests only)", 0},
+  {"httpfs", 'H', "PATH", 0,
+   "httpfs translator binary used by the fetch command"
+   " (default: $HTTPFS_BIN, /root/src/httpfs-translator/src/httpfs,"
+   " /usr/local/bin/httpfs, then PATH)", 0},
   {"help", 'h', 0, 0, "display this help and exit", 0},
   { 0 }
 };
@@ -106,6 +110,9 @@ parse_opt (int key, char *arg, struct argp_state *state)
       break;
     case 's':
       cfg.storage = arg;
+      break;
+    case 'H':
+      cfg.httpfs = arg;
       break;
     case 'h':
       argp_state_help (state, stdout, ARGP_HELP_STD_HELP);

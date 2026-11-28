@@ -45,6 +45,26 @@ struct orc_inst_row
     const char *status;             /* "ok" | "failed" */
   };
 
+/* Supervisor failure history (PLAN.md phase 2): one row per
+ * detected instance failure.  INSTANCE_ID references the
+ * run_instances row when one was persisted, NULL otherwise. */
+struct orc_incident_row
+  {
+    long long run_id;
+    long long instance_id;          /* run_instances id, or 0 = none */
+    const char *kind;               /* "crash" | "timeout" | "restart" */
+  };
+
+/* One archived fetched page (phase 3: every content is archived in
+ * training_data BEFORE being used, with its SHA-256 anti-dup). */
+struct orc_training_row
+  {
+    const char *source_url;
+    long http_status;
+    const char *content;
+    const char *checksum;           /* 64 hex chars */
+  };
+
 struct orc_storage;
 
 /* Open a backend from a spec (SPEC.md section 4):
@@ -66,12 +86,22 @@ enum orc_storage_status orc_storage_write_instance (
                                     struct orc_storage *st,
                                     const struct orc_inst_row *row,
                                     long long *id);
+enum orc_storage_status orc_storage_write_incident (
+                                    struct orc_storage *st,
+                                    const struct orc_incident_row *row,
+                                    long long *id);
+enum orc_storage_status orc_storage_write_training (
+                                    struct orc_storage *st,
+                                    const struct orc_training_row *row,
+                                    long long *id);
 
 /* --- In-memory backend introspection (unit tests only) ------------- */
 struct orc_mem_state
   {
     int n_runs;
     int n_instances;
+    int n_incidents;
+    int n_training;
     long long last_run_id;
     struct
       {
@@ -86,6 +116,18 @@ struct orc_mem_state
         char output[512];
         char status[16];
       } instances[512];
+    struct
+      {
+        long long run_id;
+        long long instance_id;
+        char kind[16];
+      } incidents[128];
+    struct
+      {
+        char source_url[512];
+        long http_status;
+        char checksum[65];
+      } training[256];
   };
 
 const struct orc_mem_state *orc_storage_mem_state (struct orc_storage *st);

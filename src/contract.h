@@ -40,6 +40,9 @@ enum orc_command
     ORC_CMD_RUN,          /* {"run": {...}} or a bare descriptor */
     ORC_CMD_STATUS,       /* {"command": "status"} */
     ORC_CMD_RESULT,       /* {"command": "result"} */
+    ORC_CMD_FETCH,        /* {"command": "fetch", "url": ...} (phase 3) */
+    ORC_CMD_FETCH_RUN,    /* {"command": "fetch_run", "url": ...,  */
+                          /*  "run": {...} sans "input"}            */
   };
 
 /* --- Readable reasons of the "invalid" response ----------------------- */
@@ -72,6 +75,8 @@ struct orc_request
   {
     enum orc_command command;
     struct orc_descriptor desc;
+    char url[2048];         /* fetch / fetch_run */
+    bool input_optional;    /* fetch_run: input comes from the fetch */
     /* When command is ORC_CMD_INVALID: */
     enum orc_invalid invalid;
     char invalid_detail[32];

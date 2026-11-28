@@ -6,24 +6,32 @@
  *
  * Commands (SPEC.md section 5): run a task descriptor (bare or
  * under "run"), ask for the status (trio type 2), ask for the
- * result (trio type 3).  A run is synchronous in phase 1: the
- * write returns when the run is done and the response slot
- * holds the result.
+ * result (trio type 3).  Since phase 2 (PLAN.md section 5) a run
+ * is asynchronous: the write returns immediately with
+ * {"run_id": N, "state": "submitted"} and the worker thread
+ * executes the run; status/result reflect the live state
+ * ("running", then "done"/"failed").
  *
  * The state is one static block, pre-allocated once: the write
- * path never allocates (the discipline of the stack).  The
- * single threaded servers (trivfs loop, REPL) serialize the
- * commands, so no lock is needed for the MVP.
+ * path never allocates (the discipline of the stack).  A mutex
+ * serializes the command thread (trivfs loop, REPL) and the
+ * worker thread of the current run.
  */
 
 #include "orchestrate.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "aggregator.h"
 #include "scheduler.h"
+#include "sha256.h"
+#include "tokenize.h"
 
 /* The engine state: configuration handles, the last run, and
  * the response slot served by reads. */
@@ -36,7 +44,9 @@ static struct
     /* Last run */
     bool has_run;
     long long run_id;
-    enum { RUN_IDLE = 0, RUN_DONE, RUN_FAILED } run_state;
+    enum { RUN_IDLE = 0, RUN_RUNNING, RUN_DONE, RUN_FAILED } run_state;
+    struct orc_descriptor pending;  /* descriptor of the running run */
+    pthread_mutex_t lock;
     int n_instances;
     struct
       {
@@ -117,10 +127,12 @@ build_status (void)
       return;
     }
 
+  const char *state = eng.run_state == RUN_DONE ? "done"
+                      : eng.run_state == RUN_RUNNING ? "running" : "failed";
+
   w = snprintf (eng.slot, sizeof eng.slot,
                 "{\"run_id\": %lld, \"state\": \"%s\", \"instances\": [",
-                eng.run_id,
-                eng.run_state == RUN_DONE ? "done" : "failed");
+                eng.run_id, state);
   if (w < 0 || (size_t) w >= sizeof eng.slot)
     {
       eng.slot_len = 0;
@@ -169,12 +181,15 @@ build_result (void)
     {
       if (eng.has_run)
         {
-          /* A failed run has no aggregate: an honest result. */
+          /* A running or failed run has no aggregate yet: an
+           * honest state, not an empty result. */
           w = snprintf (eng.slot, sizeof eng.slot,
-                        "{\"run_id\": %lld, \"state\": \"failed\","
+                        "{\"run_id\": %lld, \"state\": \"%s\","
                         " \"aggregate_strategy\": \"%s\","
                         " \"output\": \"\", \"confidence\": 0}",
-                        eng.run_id, eng.strategy);
+                        eng.run_id,
+                        eng.run_state == RUN_RUNNING ? "running" : "failed",
+                        eng.strategy);
         }
       else
         w = snprintf (eng.slot, sizeof eng.slot, "{\"empty\": true}");
@@ -199,19 +214,79 @@ build_result (void)
 }
 
 /* ---------------------------------------------------------------------
- *  One run
+ *  One run (asynchronous since phase 2)
  * ------------------------------------------------------------------- */
 
-/* Execute one descriptor: persist the run first (durability from
- * the first execution), run the instances, aggregate, serve the
- * result.  Returns 0, or -1 with errno == EIO (transport only). */
+/* Worker thread of the current run: execute the descriptor over
+ * the instances (the supervisor of the scheduler persists each
+ * instance row and each incident), aggregate, then publish the
+ * final state and the result slot. */
+static void *
+run_worker (void *arg)
+{
+  struct orc_descriptor desc = *(struct orc_descriptor *) arg;
+  struct orc_sched_result sched;
+  struct orc_aggregate agg;
+  long long run_id;
+
+  pthread_mutex_lock (&eng.lock);
+  run_id = eng.run_id;
+  pthread_mutex_unlock (&eng.lock);
+
+  if (orc_scheduler_run (&eng.io, eng.storage, &desc, run_id, &sched) < 0)
+    {
+      pthread_mutex_lock (&eng.lock);
+      eng.run_state = RUN_FAILED;
+      build_result ();
+      pthread_mutex_unlock (&eng.lock);
+      return NULL;
+    }
+
+  pthread_mutex_lock (&eng.lock);
+  eng.n_instances = sched.n;
+  eng.n_ok = sched.n_ok;
+  for (int i = 0; i < sched.n && i < ORC_MAX_INSTANCES; i++)
+    {
+      strcpy (eng.inst[i].topology, sched.inst[i].topology);
+      eng.inst[i].ok = sched.inst[i].ok;
+    }
+  if (orc_aggregate (desc.aggregate, &sched, &agg) < 0)
+    eng.run_state = RUN_FAILED;             /* no instance answered */
+  else
+    {
+      eng.run_state = RUN_DONE;
+      eng.agg = agg;
+    }
+  build_result ();
+  pthread_mutex_unlock (&eng.lock);
+  return NULL;
+}
+
+/* Submit one descriptor: persist the run first (durability from
+ * the first execution), then hand it to a worker thread and
+ * answer immediately.  Returns 0, or -1 with errno == EIO
+ * (transport only). */
 static int
-do_run (const struct orc_descriptor *desc)
+submit_run (const struct orc_descriptor *desc)
 {
   struct orc_run_row run_row;
   long long run_id = 0;
-  struct orc_sched_result sched;
-  struct orc_aggregate agg;
+  pthread_t tid;
+  int w;
+
+  pthread_mutex_lock (&eng.lock);
+  if (eng.has_run && eng.run_state == RUN_RUNNING)
+    {
+      /* One run at a time for now; the descriptor queue of
+       * PLAN phase 2 is the next increment. */
+      w = snprintf (eng.slot, sizeof eng.slot,
+                    "{\"busy\": true, \"run_id\": %lld, \"state\": \"running\"}",
+                    eng.run_id);
+      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
+                       ? (size_t) w : 0;
+      pthread_mutex_unlock (&eng.lock);
+      return 0;
+    }
 
   run_row.descriptor = desc->raw;
   run_row.aggregate_strategy = desc->aggregate;
@@ -221,6 +296,7 @@ do_run (const struct orc_descriptor *desc)
 
     if (st == ORC_ST_TRANSPORT)
       {
+        pthread_mutex_unlock (&eng.lock);
         errno = EIO;                        /* transport only */
         return -1;
       }
@@ -231,38 +307,235 @@ do_run (const struct orc_descriptor *desc)
          * response line — no EIO, no partial state. */
         slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
                                         ORC_INVALID_VALUE, "run"));
+        pthread_mutex_unlock (&eng.lock);
         return 0;
       }
   }
 
-  if (orc_scheduler_run (&eng.io, eng.storage, desc, run_id, &sched) < 0)
+  eng.has_run = true;
+  eng.run_id = run_id;
+  eng.run_state = RUN_RUNNING;
+  eng.n_instances = desc->instances;
+  eng.n_ok = 0;
+  strcpy (eng.strategy, desc->aggregate);
+  for (int i = 0; i < desc->instances && i < ORC_MAX_INSTANCES; i++)
     {
+      strcpy (eng.inst[i].topology,
+              desc->topologies[i % desc->n_topologies]);
+      eng.inst[i].ok = false;
+    }
+  eng.pending = *desc;
+
+  w = snprintf (eng.slot, sizeof eng.slot,
+                "{\"run_id\": %lld, \"state\": \"submitted\"}", run_id);
+  eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot ? (size_t) w : 0;
+
+  if (pthread_create (&tid, NULL, run_worker, &eng.pending) == 0)
+    pthread_detach (tid);
+  else
+    {
+      /* No thread available: run inline so the contract still
+       * holds (the response becomes the final result). */
+      pthread_mutex_unlock (&eng.lock);
+      run_worker (&eng.pending);
+      return 0;
+    }
+  pthread_mutex_unlock (&eng.lock);
+  return 0;
+}
+
+/* ---------------------------------------------------------------------
+ *  Phase 3: fetch — acquire a URL through httpfs, archive the content
+ *  in training_data (before any use), tokenize it into an input
+ *  vector.
+ * ------------------------------------------------------------------- */
+
+static struct orc_config eng_cfg;
+
+#define FETCH_MOUNT   "/page"
+#define FETCH_MAX_BODY (200u * 1024u)
+
+/* shell_quote — S into DST as a single-quoted /bin/sh word. */
+static void
+shell_quote (char *dst, size_t dstsz, const char *s)
+{
+  size_t n = 0;
+
+  if (dstsz == 0)
+    return;
+  dst[n++] = '\'';
+  for (const char *p = s; *p != '\0' && n + 3 < dstsz; p++)
+    {
+      if (*p == '\'')
+        {
+          dst[n++] = '\'';
+          dst[n++] = '\\';
+          dst[n++] = '\'';
+          dst[n++] = '\'';
+        }
+      else
+        dst[n++] = *p;
+    }
+  dst[n++] = '\'';
+  dst[n] = '\0';
+}
+
+/* find_httpfs — the httpfs translator binary for the fetch mount. */
+static const char *
+find_httpfs (void)
+{
+  const char *env;
+
+  if (eng_cfg.httpfs != NULL && eng_cfg.httpfs[0] != '\0')
+    return eng_cfg.httpfs;
+  env = getenv ("HTTPFS_BIN");
+  if (env != NULL && env[0] != '\0' && access (env, X_OK) == 0)
+    return env;
+  if (access ("/root/src/httpfs-translator/src/httpfs", X_OK) == 0)
+    return "/root/src/httpfs-translator/src/httpfs";
+  if (access ("/usr/local/bin/httpfs", X_OK) == 0)
+    return "/usr/local/bin/httpfs";
+  return "httpfs";
+}
+
+/* read_small_file — whole content of PATH into BUF; returns the
+ * length, or -1. */
+static long
+read_small_file (const char *path, char *buf, size_t cap)
+{
+  int fd = open (path, O_RDONLY);
+  ssize_t r;
+
+  if (fd < 0)
+    return -1;
+  r = read (fd, buf, cap - 1);
+  close (fd);
+  if (r < 0)
+    return -1;
+  buf[r] = '\0';
+  return (long) r;
+}
+
+/* fetch_url — mount httpfs on FETCH_MOUNT for URL, read the HTTP
+ * status and the body (bounded), archive the content in
+ * training_data, and tokenize it into VEC.  Returns 0 and fills
+ * STATUS/ID/BLEN/VEC/NVEC, or -1 (transport/mount). */
+static int
+fetch_url (const char *url, long *status, long long *id, size_t *blen,
+           double *vec, int *nvec)
+{
+  char q[2200], b[2200], cmd[4800];
+  static char body[FETCH_MAX_BODY + 1];
+  char stbuf[64];
+  long slen;
+  char sum[65];
+  struct orc_training_row row;
+  char *nl;
+
+  shell_quote (q, sizeof q, url);
+  shell_quote (b, sizeof b, find_httpfs ());
+  snprintf (cmd, sizeof cmd,
+            "settrans -g " FETCH_MOUNT " 2>/dev/null; "
+            "mkdir -p " FETCH_MOUNT "; "
+            "settrans -a " FETCH_MOUNT " %s %s 2>/dev/null", b, q);
+  if (system (cmd) != 0)
+    return -1;
+
+  slen = read_small_file (FETCH_MOUNT "/status", stbuf, sizeof stbuf);
+  if (slen <= 0)
+    {
+      system ("settrans -g " FETCH_MOUNT " 2>/dev/null");
       errno = EIO;
       return -1;
     }
+  *status = strtol (stbuf, &nl, 10);
 
-  /* Record the state of the last run, then aggregate. */
-  eng.has_run = true;
-  eng.run_id = run_id;
-  eng.n_instances = sched.n;
-  eng.n_ok = sched.n_ok;
-  strcpy (eng.strategy, desc->aggregate);
-  for (int i = 0; i < sched.n && i < ORC_MAX_INSTANCES; i++)
+  *blen = 0;
+  if (*status >= 200 && *status < 300)
     {
-      strcpy (eng.inst[i].topology, sched.inst[i].topology);
-      eng.inst[i].ok = sched.inst[i].ok;
+      long r = read_small_file (FETCH_MOUNT "/content", body,
+                                sizeof body);
+
+      if (r > 0)
+        *blen = (size_t) r;
     }
 
-  if (orc_aggregate (desc->aggregate, &sched, &agg) < 0)
-    eng.run_state = RUN_FAILED;             /* no instance answered */
-  else
-    {
-      eng.run_state = RUN_DONE;
-      eng.agg = agg;
-    }
+  /* Archive BEFORE any use (PLAN phase 3), even a non-200 (the 404
+   * trace belongs to training_data too). */
+  orc_sha256_hex (body, *blen, sum);
+  row.source_url = url;
+  row.http_status = *status;
+  row.content = body;
+  row.checksum = sum;
+  {
+    enum orc_storage_status st = orc_storage_write_training (eng.storage,
+                                                            &row, id);
 
-  build_result ();
+    if (st == ORC_ST_TRANSPORT)
+      {
+        system ("settrans -g " FETCH_MOUNT " 2>/dev/null");
+        errno = EIO;
+        return -1;
+      }
+  }
+
+  *nvec = orc_tokenize (body, *blen, vec, ORC_MAX_INPUT);
+  system ("settrans -g " FETCH_MOUNT " 2>/dev/null");
   return 0;
+}
+
+/* do_fetch — {"command":"fetch","url":...}: archive + tokenize, and
+ * answer with the vector so the caller can run on it. */
+static void
+do_fetch (const char *url)
+{
+  long status = 0;
+  long long id = 0;
+  size_t blen = 0;
+  double vec[ORC_MAX_INPUT];
+  int nvec = 0;
+  char esc[2048 * 2];
+  char vecbuf[ORC_MAX_INPUT * 16 + 4];
+  int w;
+
+  if (fetch_url (url, &status, &id, &blen, vec, &nvec) < 0)
+    {
+      slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
+                                      ORC_INVALID_VALUE, "fetch"));
+      return;
+    }
+  json_escape (url, esc, sizeof esc);
+  if (orc_storage_json_vector (vec, nvec, vecbuf, sizeof vecbuf) == 0)
+    strcpy (vecbuf, "[]");
+  w = snprintf (eng.slot, sizeof eng.slot,
+                "{\"url\": \"%s\", \"http_status\": %ld, \"id\": %lld,"
+                " \"bytes\": %zu, \"vector\": %s}",
+                esc, status, id, blen, vecbuf);
+  eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot ? (size_t) w : 0;
+}
+
+/* do_fetch_run — fetch_run: archive the URL, then submit a run whose
+ * input vector is the tokenized content. */
+static int
+do_fetch_run (const struct orc_request *req)
+{
+  long status = 0;
+  long long id = 0;
+  size_t blen = 0;
+  double vec[ORC_MAX_INPUT];
+  int nvec = 0;
+  struct orc_descriptor desc = req->desc;
+  int rc;
+
+  if (fetch_url (req->url, &status, &id, &blen, vec, &nvec) < 0)
+    return -1;                              /* EIO: transport */
+  desc.n_input = nvec;
+  memcpy (desc.input, vec, (size_t) nvec * sizeof *vec);
+  /* The persisted descriptor keeps the fetched input: rebuild the
+   * raw line cheaply is not possible, so persist the original run
+   * object — the vector is reproducible from the archived content. */
+  rc = submit_run (&desc);
+  return rc;
 }
 
 /* ---------------------------------------------------------------------
@@ -276,6 +549,7 @@ orc_engine_init (const struct orc_config *cfg)
 
   if (cfg == NULL)
     cfg = &defaults;
+  eng_cfg = *cfg;
 
   if (orc_instio_open (&eng.io, cfg->instio, cfg->neuron_bin,
                        cfg->mount) < 0)
@@ -285,6 +559,7 @@ orc_engine_init (const struct orc_config *cfg)
   eng.valid = true;
   eng.has_run = false;
   eng.run_state = RUN_IDLE;
+  pthread_mutex_init (&eng.lock, NULL);
 
   build_status ();                           /* the idle slot */
   return 0;
@@ -304,13 +579,16 @@ int
 orc_engine_process_line (const char *line, size_t len)
 {
   struct orc_request req;
+  int rc;
 
   while (len > 0 && line[len - 1] == '\r')
     len--;
   if (len >= ORC_MAX_LINE)
     {
+      pthread_mutex_lock (&eng.lock);
       slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
                                        ORC_INVALID_TOOLONG, NULL));
+      pthread_mutex_unlock (&eng.lock);
       return 0;
     }
 
@@ -319,24 +597,42 @@ orc_engine_process_line (const char *line, size_t len)
   switch (req.command)
     {
     case ORC_CMD_INVALID:
+      pthread_mutex_lock (&eng.lock);
       slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
                                        req.invalid,
                                        req.invalid_detail));
+      pthread_mutex_unlock (&eng.lock);
       return 0;
 
     case ORC_CMD_STATUS:
+      pthread_mutex_lock (&eng.lock);
       build_status ();
+      pthread_mutex_unlock (&eng.lock);
       return 0;
 
     case ORC_CMD_RESULT:
+      pthread_mutex_lock (&eng.lock);
       if (!eng.has_run)
         slot_set (orc_response_empty (eng.slot, sizeof eng.slot));
       else
         build_result ();
+      pthread_mutex_unlock (&eng.lock);
       return 0;
 
     case ORC_CMD_RUN:
-      return do_run (&req.desc);
+      /* submit_run takes the lock itself (it spawns the worker). */
+      rc = submit_run (&req.desc);
+      return rc;
+
+    case ORC_CMD_FETCH:
+      pthread_mutex_lock (&eng.lock);
+      do_fetch (req.url);
+      pthread_mutex_unlock (&eng.lock);
+      return 0;
+
+    case ORC_CMD_FETCH_RUN:
+      /* fetch once, then submit with the tokenized vector. */
+      return do_fetch_run (&req);
 
     default:
       errno = EINVAL;
@@ -353,7 +649,12 @@ orc_engine_response (void)
 size_t
 orc_engine_response_len (void)
 {
-  return eng.slot_len;
+  size_t n;
+
+  pthread_mutex_lock (&eng.lock);
+  n = eng.slot_len;
+  pthread_mutex_unlock (&eng.lock);
+  return n;
 }
 
 struct orc_storage *
