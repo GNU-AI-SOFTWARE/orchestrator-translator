@@ -404,6 +404,30 @@ requête structurée).
   bat la moyenne uniforme ; cluster 2–5 nœuds avec failover automatique
   d'un nœud ; `watch` répond en lecture seule sans état global partagé.
 
+### Phase 8 — GNU AI se comporte comme un LLM (bout en bout)
+
+- Toute écriture sur `/inference/prompt` produit une **réponse calculée
+  par les neurones** : la requête `request` (type 1) est lue, le prompt
+  (plus `params.context` quand `grounded` est vrai) est vectorisé et
+  distribué aux `/llm1…N`, les sections `Output:` sont agrégées (vote
+  majoritaire / moyenne, phase 1) et servies dans `/orchestrate/result`
+  (type 3) avec les citations `sources` exigées quand `grounded`.
+- Le client `inference` affiche cette réponse comme celle d'un LLM :
+  `/submit` → spinner → `result` avec `source_url` + checksum
+  vérifiables dans `/db/training_data/<id>` ; `grounded: "empty"` quand
+  aucun extrait de `/db` ne correspond — jamais d'hallucination
+  silencieuse.
+- Démo de bout en bout dans la VM Hurd :
+  `python3 /root/launch_inference.py` monte `/db`, `/orchestrate`
+  (+ `/llm1…N`), `/inference`, `/web`, puis ouvre le client.
+- **Livrable** : pile complète démarrée dans la VM QEMU
+  (mistral-vm-debian-hurd), `make check` vert partout.
+- **Acceptation** : dans la VM, `echo "…" | tee /inference/prompt` puis
+  `cat /orchestrate/result` rend une réponse de neurone ancrée, relisible
+  en POSIX pur.
+- **Dépend de** : phases 3–5 + inference phases 9–10,12 + data-base
+  phase 3,7.
+
 ---
 
 ## 6. Schéma PostgreSQL (gelé en phase 0, utilisé dès la phase 1)
