@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "aggregator.h"
+#include "contract_internal.h"
 #include "scheduler.h"
 #include "sha256.h"
 #include "tokenize.h"
@@ -225,7 +226,7 @@ run_worker (void *arg)
    * One run at a time (busy reject), so a static is safe. */
   static struct orc_descriptor desc;
   desc = *(struct orc_descriptor *) arg;
-  struct orc_sched_result sched;
+  static struct orc_sched_result sched;   /* 135 KiB: off the worker stack */
   struct orc_aggregate agg;
   long long run_id;
 
@@ -540,6 +541,459 @@ do_fetch_run (const struct orc_request *req)
 }
 
 /* ---------------------------------------------------------------------
+ *  Phase A3: replay and history (the read half of the storage layer)
+ * ------------------------------------------------------------------- */
+
+/* Select rows and the replayed descriptor are large: static, never
+ * on the (small) demuxer stack. */
+static char a3_rows[256u * 1024u];
+static char a3_desc[ORC_MAX_LINE];
+/* The scanner arena reserves len-pos+1 per string: parsing a whole
+ * select body needs its own arena, bigger than eng_scratch. */
+static char a3_scratch[256u * 1024u];
+
+/* scan_init — a scanner over a NUL-terminated buffer. */
+static void
+scan_init (struct scanner *sc, const char *s, size_t len,
+           char *scratch, size_t scratch_cap)
+{
+  memset (sc, 0, sizeof *sc);
+  sc->s = s;
+  sc->pos = 0;
+  sc->len = len;
+  sc->scratch = scratch;
+  sc->scratch_cap = scratch_cap;
+  sc->scratch_len = 0;
+}
+
+/* do_history — per-topology counters from run_instances. */
+static void
+do_history (void)
+{
+  static struct
+    {
+      char topology[ORC_MAX_TOPOLOGY + 1];
+      long total;
+      long ok;
+    } tops[64];
+  long count = 0;
+  enum orc_storage_status st;
+  struct scanner sc;
+  int ntops = 0;
+  size_t len = 0;
+  int w;
+
+  pthread_mutex_lock (&eng.lock);
+
+  st = orc_storage_select (eng.storage, "run_instances", NULL, NULL,
+                           4096, a3_rows, sizeof a3_rows, &count);
+  if (st == ORC_ST_TRANSPORT)
+    {
+      slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
+                                       ORC_INVALID_VALUE, "transport"));
+      pthread_mutex_unlock (&eng.lock);
+      return;
+    }
+
+  /* Scan the whole body object by object. */
+  ntops = 0;
+  scan_init (&sc, a3_rows, strlen (a3_rows), a3_scratch,
+             sizeof a3_scratch);
+  while (sc.pos < sc.len && ntops < 64)
+    {
+      char topo[ORC_MAX_TOPOLOGY + 1] = "";
+      char status[16] = "";
+      int t = -1;
+
+      skip_ws (&sc);
+      if (peek (&sc) != '{')
+        break;
+      next (&sc);
+      /* walk the object keys */
+      skip_ws (&sc);
+      if (peek (&sc) != '}')
+        for (;;)
+          {
+            size_t kl = 0;
+            const char *k = parse_string (&sc, &kl);
+            size_t v0, v1;
+
+            if (k == NULL)
+              break;
+            skip_ws (&sc);
+            if (next (&sc) != ':')
+              break;
+            skip_ws (&sc);
+            if (skip_value (&sc, &v0, &v1) < 0)
+              break;
+            if (kl == 8 && memcmp (k, "topology", 8) == 0)
+              {
+                size_t n = v1 - v0;
+
+                if (n >= 2 && n - 2 < sizeof topo)
+                  {
+                    memcpy (topo, sc.s + v0 + 1, n - 2);
+                    topo[n - 2] = '\0';
+                  }
+              }
+            else if (kl == 6 && memcmp (k, "status", 6) == 0)
+              {
+                size_t n = v1 - v0;
+
+                if (n >= 2 && n - 2 < sizeof status)
+                  {
+                    memcpy (status, sc.s + v0 + 1, n - 2);
+                    status[n - 2] = '\0';
+                  }
+              }
+            skip_ws (&sc);
+            {
+              int c = next (&sc);
+
+              if (c == ',')
+                {
+                  skip_ws (&sc);
+                  continue;
+                }
+              break;
+            }
+          }
+      if (topo[0] != '\0')
+        {
+          for (t = 0; t < ntops; t++)
+            if (strcmp (tops[t].topology, topo) == 0)
+              break;
+          if (t == ntops && ntops < 64)
+            {
+              strcpy (tops[ntops].topology, topo);
+              ntops++;
+            }
+          if (t < ntops)
+            {
+              tops[t].total++;
+              if (strcmp (status, "ok") == 0)
+                tops[t].ok++;
+            }
+        }
+      skip_ws (&sc);
+      if (peek (&sc) == ',')
+        next (&sc);
+    }
+
+  w = snprintf (eng.slot, sizeof eng.slot,
+                "{\"command\": \"history\", \"topologies\": [");
+  if (w < 0 || (size_t) w >= sizeof eng.slot)
+    {
+      eng.slot_len = 0;
+      pthread_mutex_unlock (&eng.lock);
+      return;
+    }
+  len = (size_t) w;
+  for (int t = 0; t < ntops; t++)
+    {
+      w = snprintf (eng.slot + len, sizeof eng.slot - len,
+                    "%s{\"topology\": \"%s\", \"total\": %ld, "
+                    "\"ok\": %ld, \"failed\": %ld}",
+                    t > 0 ? "," : "", tops[t].topology, tops[t].total,
+                    tops[t].ok, tops[t].total - tops[t].ok);
+      if (w < 0 || (size_t) w >= sizeof eng.slot - len)
+        break;
+      len += (size_t) w;
+    }
+  w = snprintf (eng.slot + len, sizeof eng.slot - len, "]}");
+  if (w < 0 || (size_t) w >= sizeof eng.slot - len)
+    {
+      eng.slot_len = 0;
+      pthread_mutex_unlock (&eng.lock);
+      return;
+    }
+  eng.slot_len = len + (size_t) w;
+  pthread_mutex_unlock (&eng.lock);
+}
+
+/* do_replay — re-execute a persisted run from the archive (no fetch,
+ * instances mounted locally) and compare with the stored output. */
+static void
+do_replay (long long run_id)
+{
+  char idbuf[24];
+  long count = 0;
+  enum orc_storage_status st;
+  static struct orc_request req2;       /* 72 KiB: off the stack */
+  struct scanner sc;
+  static struct orc_sched_result sched;   /* 135 KiB: off the demuxer stack */
+  struct orc_aggregate agg;
+  struct orc_run_row run_row;
+  long long new_id = 0;
+  double sv[ORC_MAX_OUTPUT];
+  int sn = 0;
+  bool match = false;
+  int w;
+
+  snprintf (idbuf, sizeof idbuf, "%lld", run_id);
+  st = orc_storage_select (eng.storage, "runs", "id", idbuf, 1,
+                           a3_rows, sizeof a3_rows, &count);
+  if (st != ORC_ST_OK)
+    {
+      w = snprintf (eng.slot, sizeof eng.slot,
+                    "{\"command\": \"replay\", \"run_id\": %lld, "
+                    "\"error\": \"not_found\"}", run_id);
+      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
+                       ? (size_t) w : 0;
+      return;
+    }
+
+  /* First row: extract the descriptor (and the strategy). */
+  scan_init (&sc, a3_rows, strlen (a3_rows), a3_scratch,
+             sizeof a3_scratch);
+  skip_ws (&sc);
+  if (peek (&sc) == '{')
+    next (&sc);
+  a3_desc[0] = '\0';
+  {
+    /* walk keys of the first row object */
+    skip_ws (&sc);
+    if (peek (&sc) != '}')
+      for (;;)
+        {
+          size_t kl = 0;
+          const char *k = parse_string (&sc, &kl);
+          size_t v0, v1;
+
+          if (k == NULL)
+            break;
+          skip_ws (&sc);
+          if (next (&sc) != ':')
+            break;
+          skip_ws (&sc);
+          if (skip_value (&sc, &v0, &v1) < 0)
+            break;
+          if (kl == 10 && memcmp (k, "descriptor", 10) == 0)
+            {
+              size_t n = v1 - v0;
+
+              if (n >= sizeof a3_desc)
+                n = sizeof a3_desc - 1;
+              memcpy (a3_desc, sc.s + v0, n);
+              a3_desc[n] = '\0';
+            }
+          skip_ws (&sc);
+          {
+            int c = next (&sc);
+
+            if (c == ',')
+              {
+                skip_ws (&sc);
+                continue;
+              }
+            break;
+          }
+        }
+  }
+  if (a3_desc[0] == '\0')
+    {
+      slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
+                                       ORC_INVALID_FIELD, "descriptor"));
+      return;
+    }
+
+  /* Parse the stored descriptor. */
+  scan_init (&sc, a3_desc, strlen (a3_desc), a3_scratch,
+             sizeof a3_scratch);
+  memset (&req2, 0, sizeof req2);
+  if (parse_descriptor (&sc, &req2) < 0)
+    {
+      slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
+                                       ORC_INVALID_JSON, NULL));
+      return;
+    }
+
+  /* One run at a time: replay while a run is live would fight over
+   * the instances. */
+  pthread_mutex_lock (&eng.lock);
+  if (eng.has_run && eng.run_state == RUN_RUNNING)
+    {
+      w = snprintf (eng.slot, sizeof eng.slot,
+                    "{\"busy\": true, \"run_id\": %lld, "
+                    "\"state\": \"running\"}", eng.run_id);
+      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
+                       ? (size_t) w : 0;
+      pthread_mutex_unlock (&eng.lock);
+      return;
+    }
+  pthread_mutex_unlock (&eng.lock);
+
+  /* Persist the replay as its own run, then execute it. */
+  run_row.descriptor = a3_desc;
+  run_row.aggregate_strategy = req2.desc.aggregate;
+  if (orc_storage_write_run (eng.storage, &run_row, &new_id) ==
+      ORC_ST_TRANSPORT)
+    {
+      slot_set (orc_response_invalid (eng.slot, sizeof eng.slot,
+                                       ORC_INVALID_VALUE, "transport"));
+      return;
+    }
+
+  memset (&sched, 0, sizeof sched);
+  if (orc_scheduler_run (&eng.io, eng.storage, &req2.desc, new_id,
+                         &sched) < 0
+      || orc_aggregate (req2.desc.aggregate, &sched, &agg) < 0)
+    {
+      w = snprintf (eng.slot, sizeof eng.slot,
+                    "{\"command\": \"replay\", \"run_id\": %lld, "
+                    "\"replay_run_id\": %lld, \"error\": \"replay_failed\"}",
+                    run_id, new_id);
+      eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
+                       ? (size_t) w : 0;
+      return;
+    }
+
+  /* Compare with the HISTORY: re-aggregate the stored run_instances
+   * outputs of that run and compare the two aggregates. */
+  {
+    static struct orc_sched_result hist;  /* 135 KiB */
+    struct orc_aggregate hist_agg;
+
+    memset (&hist, 0, sizeof hist);
+    st = orc_storage_select (eng.storage, "run_instances", "run_id",
+                             idbuf, 4096, a3_rows, sizeof a3_rows,
+                             &count);
+    if (st == ORC_ST_OK)
+      {
+        scan_init (&sc, a3_rows, strlen (a3_rows), eng_scratch,
+                   sizeof eng_scratch);
+        while (sc.pos < sc.len && hist.n < ORC_MAX_INSTANCES)
+          {
+            char status[16] = "";
+            char outraw[1024] = "";
+
+            skip_ws (&sc);
+            if (peek (&sc) != '{')
+              break;
+            next (&sc);
+            skip_ws (&sc);
+            if (peek (&sc) != '}')
+              for (;;)
+                {
+                  size_t kl = 0;
+                  const char *k = parse_string (&sc, &kl);
+                  size_t v0, v1;
+
+                  if (k == NULL)
+                    break;
+                  skip_ws (&sc);
+                  if (next (&sc) != ':')
+                    break;
+                  skip_ws (&sc);
+                  if (skip_value (&sc, &v0, &v1) < 0)
+                    break;
+                  if (kl == 6 && memcmp (k, "status", 6) == 0)
+                    {
+                      size_t n = v1 - v0;
+
+                      if (n >= 2 && n - 2 < sizeof status)
+                        {
+                          memcpy (status, sc.s + v0 + 1, n - 2);
+                          status[n - 2] = '\0';
+                        }
+                    }
+                  else if (kl == 6 && memcmp (k, "output", 6) == 0)
+                    {
+                      size_t n = v1 - v0;
+
+                      if (n < sizeof outraw)
+                        {
+                          memcpy (outraw, sc.s + v0, n);
+                          outraw[n] = '\0';
+                        }
+                    }
+                  skip_ws (&sc);
+                  {
+                    int c = next (&sc);
+
+                    if (c == ',')
+                      {
+                        skip_ws (&sc);
+                        continue;
+                      }
+                    break;
+                  }
+                }
+            if (strcmp (status, "ok") == 0 && outraw[0] == '[')
+              {
+                struct scanner sc2;
+                int nn = 0;
+
+                scan_init (&sc2, outraw, strlen (outraw), a3_scratch,
+                           sizeof a3_scratch);
+                next (&sc2);            /* '[' */
+                while (nn < ORC_MAX_OUTPUT)
+                  {
+                    size_t v0, v1;
+
+                    skip_ws (&sc2);
+                    if (peek (&sc2) == ']')
+                      break;
+                    if (skip_value (&sc2, &v0, &v1) < 0)
+                      break;
+                    hist.inst[hist.n].out[nn] = atof (sc2.s + v0);
+                    nn++;
+                    skip_ws (&sc2);
+                    if (peek (&sc2) == ',')
+                      next (&sc2);
+                  }
+                if (nn > 0)
+                  {
+                    hist.inst[hist.n].n_out = nn;
+                    hist.inst[hist.n].ok = true;
+                    hist.n++;
+                    hist.n_ok++;
+                  }
+              }
+            skip_ws (&sc);
+            if (peek (&sc) == ',')
+              next (&sc);
+          }
+      }
+
+    if (hist.n_ok > 0
+        && orc_aggregate (req2.desc.aggregate, &hist, &hist_agg) == 0)
+      {
+        match = hist_agg.n == agg.n;
+        for (int i = 0; match && i < agg.n; i++)
+          {
+            double d = hist_agg.out[i] - agg.out[i];
+
+            if (d < -1e-6 || d > 1e-6)
+              match = false;
+          }
+        sn = hist_agg.n;
+        memcpy (sv, hist_agg.out, sizeof sv);
+      }
+  }
+
+  {
+    char vecbuf[ORC_MAX_OUTPUT * 16 + 4];
+    char histbuf[ORC_MAX_OUTPUT * 16 + 4];
+
+    if (orc_storage_json_vector (agg.out, agg.n, vecbuf,
+                                 sizeof vecbuf) == 0)
+      strcpy (vecbuf, "[]");
+    if (orc_storage_json_vector (sv, sn, histbuf, sizeof histbuf) == 0)
+      strcpy (histbuf, "[]");
+    w = snprintf (eng.slot, sizeof eng.slot,
+                  "{\"command\": \"replay\", \"run_id\": %lld, "
+                  "\"replay_run_id\": %lld, \"match\": %s, "
+                  "\"replayed\": %s, \"historical\": %s, "
+                  "\"confidence\": %.3f}",
+                  run_id, new_id, match ? "true" : "false",
+                  vecbuf, histbuf, agg.confidence);
+    eng.slot_len = w > 0 && (size_t) w < sizeof eng.slot
+                     ? (size_t) w : 0;
+  }
+}
+
+/* ---------------------------------------------------------------------
  *  Init and command processing
  * ------------------------------------------------------------------- */
 
@@ -638,6 +1092,16 @@ orc_engine_process_line (const char *line, size_t len)
     case ORC_CMD_FETCH_RUN:
       /* fetch once, then submit with the tokenized vector. */
       return do_fetch_run (&req);
+
+    case ORC_CMD_HISTORY:
+      /* do_history builds the slot under the lock itself; the
+       * command path must NOT arrive here with the lock held. */
+      do_history ();
+      return 0;
+
+    case ORC_CMD_REPLAY:
+      do_replay (req.run_id);
+      return 0;
 
     default:
       errno = EINVAL;

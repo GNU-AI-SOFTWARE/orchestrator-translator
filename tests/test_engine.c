@@ -208,6 +208,26 @@ main (void)
   process ("{\"command\": \"result\"}");
   CHECK_STR (orc_engine_response (), "\"output\": \"[1,1]\"");
 
+  /* 7. Phase A3: history aggregates run_instances per topology. */
+  process ("{\"command\": \"history\"}");
+  CHECK_STR (orc_engine_response (), "\"command\": \"history\"");
+  CHECK_STR (orc_engine_response (), "\"topology\": \"2,4,1\"");
+  CHECK_STR (orc_engine_response (), "\"total\": 2");
+  CHECK_STR (orc_engine_response (), "\"topology\": \"2,8,1\"");
+
+  /* 8. Phase A3: replay of run 1 re-executes from the archive and
+   * matches the historical aggregate (deterministic simulator). */
+  process ("{\"command\": \"replay\", \"run_id\": 1}");
+  CHECK_STR (orc_engine_response (), "\"command\": \"replay\"");
+  CHECK_STR (orc_engine_response (), "\"run_id\": 1");
+  CHECK_STR (orc_engine_response (), "\"match\": true");
+  CHECK_STR (orc_engine_response (), "\"replayed\": [1,1]");
+  CHECK_STR (orc_engine_response (), "\"historical\": [1,1]");
+
+  /* 9. Replay of an unknown run is a readable answer. */
+  process ("{\"command\": \"replay\", \"run_id\": 999}");
+  CHECK_STR (orc_engine_response (), "\"error\": \"not_found\"");
+
   orc_engine_shutdown ();
   /* Leave the tree exactly as we found it (distcheck checks). */
   for (int i = 1; i <= 4; i++)

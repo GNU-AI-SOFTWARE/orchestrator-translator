@@ -45,5 +45,12 @@ enum orc_storage_status orc_db_write_training (
                                         struct orc_db *db,
                                         const struct orc_training_row *row,
                                         long long *id);
+enum orc_storage_status orc_db_select (struct orc_db *db,
+                                      const char *table,
+                                      const char *where_col,
+                                      const char *where_val,
+                                      long limit,
+                                      char *out, size_t cap,
+                                      long *count);
 
 #endif /* ORC_STORAGE_DB_H */

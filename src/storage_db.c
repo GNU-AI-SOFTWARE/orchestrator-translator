@@ -473,3 +473,77 @@ orc_db_write_incident (struct orc_db *db, const struct orc_incident_row *row,
     return ORC_ST_INVALID;
   return db_submit (db, line, id);
 }
+
+/* Phase A3 read half: one select, one (possibly large) response line.
+ * The response rides a static buffer — select rows are not tiny. */
+enum orc_storage_status
+orc_db_select (struct orc_db *db, const char *table,
+               const char *where_col, const char *where_val,
+               long limit, char *out, size_t cap, long *count)
+{
+  static char resp[256u * 1024u];
+  char line[512];
+  size_t n;
+  int w;
+
+  w = snprintf (line, sizeof line, "{\"select\": \"%s\"", table);
+  if (w < 0 || (size_t) w >= sizeof line)
+    return ORC_ST_INVALID;
+  n = (size_t) w;
+  if (where_col != NULL)
+    {
+      bool is_num = where_val[0] >= '0' && where_val[0] <= '9';
+
+      w = snprintf (line + n, sizeof line - n,
+                    ", \"where\": {\"%s\": %s%s%s}",
+                    where_col, is_num ? "" : "\"", where_val,
+                    is_num ? "" : "\"");
+      if (w < 0 || (size_t) w >= sizeof line - n)
+        return ORC_ST_INVALID;
+      n += (size_t) w;
+    }
+  w = snprintf (line + n, sizeof line - n, ", \"limit\": %ld}", limit);
+  if (w < 0 || (size_t) w >= sizeof line - n)
+    return ORC_ST_INVALID;
+
+  if (db_roundtrip (db, line, resp, sizeof resp) < 0)
+    return ORC_ST_TRANSPORT;
+
+  /* Response: {"count": N, "rows": [ ... ]} — extract the array
+   * body.  An {"invalid": ...} or {"empty": true} answer maps to
+   * INVALID / EMPTY. */
+  {
+    const char *p = strstr (resp, "\"rows\": [");
+
+    if (p == NULL)
+      {
+        if (strstr (resp, "\"empty\"") != NULL)
+          {
+            *count = 0;
+            if (cap > 0)
+              out[0] = '\0';
+            return ORC_ST_EMPTY;
+          }
+        return ORC_ST_INVALID;
+      }
+    p += strlen ("\"rows\": [");
+    {
+      const char *end = strrchr (resp, ']');
+
+      if (end == NULL || end < p)
+        return ORC_ST_INVALID;
+      size_t body = (size_t) (end - p);
+
+      if (body >= cap)
+        body = cap - 1;
+      memcpy (out, p, body);
+      out[body] = '\0';
+    }
+    {
+      const char *c = strstr (resp, "\"count\": ");
+
+      *count = c != NULL ? atol (c + strlen ("\"count\": ")) : 0;
+    }
+    return *count > 0 ? ORC_ST_OK : ORC_ST_EMPTY;
+  }
+}

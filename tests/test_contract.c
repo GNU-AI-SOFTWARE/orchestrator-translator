@@ -100,10 +100,18 @@ test_commands (void)
   parse ("{ \"command\" : \"result\" }");
   CHECK (req.command == ORC_CMD_RESULT);
 
+  /* replay exists since A3 but requires a run_id (phase A3). */
   parse ("{\"command\": \"replay\"}");
   CHECK (req.command == ORC_CMD_INVALID);
-  CHECK (req.invalid == ORC_INVALID_VALUE);
-  CHECK_STR (req.invalid_detail, "command");
+  CHECK (req.invalid == ORC_INVALID_FIELD);
+  CHECK_STR (req.invalid_detail, "run_id");
+
+  parse ("{\"command\": \"replay\", \"run_id\": 17}");
+  CHECK (req.command == ORC_CMD_REPLAY);
+  CHECK (req.run_id == 17);
+
+  parse ("{\"command\": \"history\"}");
+  CHECK (req.command == ORC_CMD_HISTORY);
 }
 
 static void

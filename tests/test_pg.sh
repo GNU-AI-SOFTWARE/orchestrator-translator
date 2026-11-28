@@ -157,6 +157,37 @@ EXPECT=$(printf '2,4,1\n2,8,1')
 [ "$V" = "$EXPECT" ] \
     || fail "the two topologies of run 1 must be persisted in order"
 
+# --- 4. Phase A3: history and replay over the same base -------------
+OUT=$(printf '%s\n' '{"command": "history"}' | "$BINARY" \
+    --instances "dir:$WORK/inst" --storage "$STORAGE" \
+    --conninfo "$CONNINFO" 2>/dev/null)
+printf '%s' "$OUT" | grep -q '"command": "history"' \
+    || fail "history must answer with its command name"
+printf '%s' "$OUT" | grep -q '"topology": "2,4,1"' \
+    || fail "history must list the topology 2,4,1"
+printf '%s' "$OUT" | grep -q '"topology": "2,4,1", "total": 9' \
+    || fail "history must count 9 instances on topology 2,4,1"
+printf '%s' "$OUT" | grep -q '"topology": "2,8,1", "total": 1' \
+    || fail "history must count 1 instance on topology 2,8,1"
+
+OUT=$(printf '%s\n' '{"command": "replay", "run_id": 1}' | "$BINARY" \
+    --instances "dir:$WORK/inst" --storage "$STORAGE" \
+    --conninfo "$CONNINFO" 2>/dev/null)
+printf '%s' "$OUT" | grep -q '"command": "replay"' \
+    || fail "replay must answer with its command name"
+printf '%s' "$OUT" | grep -q '"run_id": 1' \
+    || fail "replay must echo the requested run_id"
+printf '%s' "$OUT" | grep -q '"match": true' \
+    || fail "replay of run 1 must reproduce the historical aggregate"
+printf '%s' "$OUT" | grep -q '"replayed": \[1,1\]' \
+    || fail "the replayed aggregate must be [1,1]"
+
+OUT=$(printf '%s\n' '{"command": "replay", "run_id": 999}' | "$BINARY" \
+    --instances "dir:$WORK/inst" --storage "$STORAGE" \
+    --conninfo "$CONNINFO" 2>/dev/null)
+printf '%s' "$OUT" | grep -q '"error": "not_found"' \
+    || fail "replay of an unknown run must answer not_found"
+
 if [ "$FAIL" = 0 ]; then
     say "test_pg: OK"
     exit 0

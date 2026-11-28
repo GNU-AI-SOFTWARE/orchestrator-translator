@@ -124,6 +124,10 @@ orc_parse (const char *line, size_t len,
               req->command = ORC_CMD_FETCH_RUN;
               req->input_optional = true;   /* input comes from the URL */
             }
+          else if (strcmp (c, "replay") == 0)
+            req->command = ORC_CMD_REPLAY;
+          else if (strcmp (c, "history") == 0)
+            req->command = ORC_CMD_HISTORY;
           else
             {
               req->invalid = ORC_INVALID_VALUE;
@@ -152,6 +156,29 @@ orc_parse (const char *line, size_t len,
           memcpy (req->url, u, ulen);
           req->url[ulen] = '\0';
           have_url = true;
+        }
+      else if (strcmp (keybuf, "run_id") == 0)
+        {
+          size_t v0, v1;
+
+          if (skip_value (&sc, &v0, &v1) < 0)
+            {
+              req->invalid = ORC_INVALID_JSON;
+              return;
+            }
+          {
+            char numbuf[24];
+
+            if (v1 - v0 >= sizeof numbuf)
+              {
+                req->invalid = ORC_INVALID_TYPE;
+                set_detail (req, "run_id");
+                return;
+              }
+            memcpy (numbuf, sc.s + v0, v1 - v0);
+            numbuf[v1 - v0] = '\0';
+            req->run_id = atoll (numbuf);
+          }
         }
       else if (strcmp (keybuf, "instances") == 0
                || strcmp (keybuf, "topologies") == 0
@@ -246,7 +273,14 @@ orc_parse (const char *line, size_t len,
             }
           req->command = ORC_CMD_FETCH;     /* no run: plain fetch */
         }
-      return;                                 /* STATUS/RESULT/FETCH */
+      if (req->command == ORC_CMD_REPLAY && req->run_id <= 0)
+        {
+          req->command = ORC_CMD_INVALID;
+          req->invalid = ORC_INVALID_FIELD;
+          set_detail (req, "run_id");
+          return;
+        }
+      return;                       /* STATUS/RESULT/FETCH/REPLAY/HISTORY */
     }
 
   req->invalid = ORC_INVALID_FIELD;

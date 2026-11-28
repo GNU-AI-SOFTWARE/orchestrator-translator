@@ -95,6 +95,20 @@ enum orc_storage_status orc_storage_write_training (
                                     const struct orc_training_row *row,
                                     long long *id);
 
+/* Read half (phase A3: replay/history): one table, one optional
+ * single-column equality filter, one row cap.  The rows come back as
+ * a JSON array body (no surrounding brackets) in OUT; *COUNT receives
+ * the row count.  WHERE_COL is a whitelisted column name; the value
+ * is passed as text (numbers included).  Returns ORC_ST_EMPTY when no
+ * row matches. */
+enum orc_storage_status orc_storage_select (struct orc_storage *st,
+                                            const char *table,
+                                            const char *where_col,
+                                            const char *where_val,
+                                            long limit,
+                                            char *out, size_t cap,
+                                            long *count);
+
 /* --- In-memory backend introspection (unit tests only) ------------- */
 struct orc_mem_state
   {

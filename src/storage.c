@@ -151,6 +151,86 @@ mem_write_training (struct orc_storage *st, const struct orc_training_row *row,
   return ORC_ST_OK;
 }
 
+/* --- In-memory select (unit tests; mirrors the db wire shape) ----- */
+
+static enum orc_storage_status
+mem_select (struct orc_storage *st, const char *table,
+            const char *where_col, const char *where_val, long limit,
+            char *out, size_t cap, long *count)
+{
+  struct orc_mem_state *m = &st->mem;
+  size_t len = 0;
+  long n = 0;
+
+  if (strcmp (table, "runs") == 0)
+    {
+      for (int i = 0; i < m->n_runs && n < limit; i++)
+        {
+          char idbuf[24];
+
+          snprintf (idbuf, sizeof idbuf, "%lld", m->last_run_id - m->n_runs + 1 + i);
+          if (where_col != NULL && strcmp (where_col, "id") == 0
+              && strcmp (where_val, idbuf) != 0)
+            continue;
+          {
+            int w = snprintf (out + len, cap - len,
+                              "%s{\"id\": %s, \"descriptor\": %s, "
+                              "\"aggregate_strategy\": \"%s\"}",
+                              n > 0 ? "," : "", idbuf,
+                              m->runs[i].descriptor,
+                              m->runs[i].aggregate_strategy);
+
+            if (w < 0 || (size_t) w >= cap - len)
+              break;
+            len += (size_t) w;
+            n++;
+          }
+        }
+    }
+  else if (strcmp (table, "run_instances") == 0)
+    {
+      for (int i = 0; i < m->n_instances && n < limit; i++)
+        {
+          char idbuf[24];
+          char ridbuf[24];
+
+          snprintf (idbuf, sizeof idbuf, "%d", i + 1);
+          snprintf (ridbuf, sizeof ridbuf, "%lld", m->instances[i].run_id);
+          if (where_col != NULL
+              && ((strcmp (where_col, "id") == 0
+                   && strcmp (where_val, idbuf) != 0)
+                  || (strcmp (where_col, "run_id") == 0
+                      && strcmp (where_val, ridbuf) != 0)))
+            continue;
+          {
+            int w = snprintf (out + len, cap - len,
+                              "%s{\"id\": %s, \"run_id\": %lld, "
+                              "\"topology\": \"%s\", \"input\": %s, "
+                              "\"output\": %s, \"status\": \"%s\"}",
+                              n > 0 ? "," : "", idbuf,
+                              m->instances[i].run_id,
+                              m->instances[i].topology,
+                              m->instances[i].input,
+                              m->instances[i].output[0] != '\0'
+                                ? m->instances[i].output : "null",
+                              m->instances[i].status);
+
+            if (w < 0 || (size_t) w >= cap - len)
+              break;
+            len += (size_t) w;
+            n++;
+          }
+        }
+    }
+  else
+    return ORC_ST_INVALID;
+
+  if (len < cap)
+    out[len] = '\0';
+  *count = n;
+  return n > 0 ? ORC_ST_OK : ORC_ST_EMPTY;
+}
+
 /* --- Dispatch -------------------------------------------------------- */
 
 enum orc_storage_status
@@ -190,6 +270,18 @@ orc_storage_write_training (struct orc_storage *st,
   if (st->mode == 1)
     return orc_db_write_training (&st->db, row, id);
   return mem_write_training (st, row, id);
+}
+
+enum orc_storage_status
+orc_storage_select (struct orc_storage *st, const char *table,
+                    const char *where_col, const char *where_val,
+                    long limit, char *out, size_t cap, long *count)
+{
+  if (st->mode == 1)
+    return orc_db_select (&st->db, table, where_col, where_val, limit,
+                          out, cap, count);
+  return mem_select (st, table, where_col, where_val, limit, out, cap,
+                     count);
 }
 
 const struct orc_mem_state *
